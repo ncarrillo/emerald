@@ -1,7 +1,7 @@
 use std::mem;
 
-use crate::scheduler::Scheduler;
 use crate::hw::extensions::BitManipulation;
+use crate::scheduler::Scheduler;
 
 #[derive(Default, Clone, Debug, Eq, PartialEq)]
 pub struct MapleRegisters {}
@@ -45,7 +45,7 @@ pub const CONT_TYPE_STANDARD_CONTROLLER: u32 =
     MAPLE_CAP_STANDARD_BUTTONS | MAPLE_CAP_TRIGGERS | MAPLE_CAP_DPAD | MAPLE_CAP_ANALOG;
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
-#[repr(C, packed)]
+#[repr(C)]
 pub struct MapleDeviceInfo {
     func: u32,
     data: [u32; 3],
@@ -64,7 +64,7 @@ pub struct MapleFrame {
     dest_addr: u8,
     source_addr: u8,
     length: u8,
-    data: [u32; 251],
+    data: [u32; 255],
 }
 
 impl Maple {
@@ -80,74 +80,81 @@ impl Maple {
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, bytes.len() / 4) }
     }
 
-    fn write_device_info(buffer: &mut [u8], offset: usize, device_info: &MapleDeviceInfo) {
-        let device_info_size = mem::size_of::<MapleDeviceInfo>();
-        unsafe {
-            let src = device_info as *const MapleDeviceInfo as *const u8;
-            let dst = buffer.as_mut_ptr().add(offset);
-            std::ptr::copy_nonoverlapping(src, dst, device_info_size);
-        }
+    pub fn process_maple_frame(&mut self, tx_frame: &MapleFrame, rx_frame: &mut MapleFrame) {
+        let cmd_id = tx_frame.cmd;
+        //println!("maple: got command {:08x}", cmd_id);
+
+        match cmd_id {
+            0x01 => {
+                /*
+
+                int32 func                   ; function codes supported by this peripheral (or:ed together) (big endian)
+                int32[3] function_data       ; additional info for the supported function codes (3 max) (big endian)
+                int8 area_code               ; regional code of peripheral
+                int8 connector_direction (?) ; physical orientation of bus connection
+                char[30] product_name        ; name of peripheral
+                char[60] product_license     ; license statement
+                int16 standby_power          ; standby power consumption (little endian)
+                int16 max_power              ; maximum power consumption (little endian)
+
+                 */
+                let name = "Dreamcast Controller";
+                let license = "Produced By or Under License From SEGA ENTERPRISES,LTD.";
+
+                let mut name_buffer = [0x20u8; 30];
+                let mut license_buffer = [0x20u8; 60];
+
+                let len_name = name.as_bytes().len().min(name_buffer.len());
+                name_buffer[..len_name].copy_from_slice(&name.as_bytes()[..len_name]);
+
+                let len_license = license.as_bytes().len().min(license_buffer.len());
+                license_buffer[..len_license].copy_from_slice(&license.as_bytes()[..len_license]);
+
+                let device_info = MapleDeviceInfo {
+                    func: (0x01000000_u32),
+                    data: [
+                        // this is already big endian
+                        CONT_TYPE_STANDARD_CONTROLLER,
+                        0,
+                        0,
+                    ],
+                    standby_power: 0x01ae,
+                    max_power: 0x01f4,
+                    region: 0xff,
+                    direction: 0, // ?? idk
+                    name: name_buffer,
+                    license: license_buffer,
+                };
+
+                let device_info_bytes = unsafe {
+                    let ptr = &device_info as *const MapleDeviceInfo as *const u8;
+                    std::slice::from_raw_parts(ptr, std::mem::size_of::<MapleDeviceInfo>())
+                };
+
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        device_info_bytes.as_ptr(),
+                        rx_frame.data.as_mut_ptr() as *mut u8,
+                        mem::size_of::<MapleDeviceInfo>(),
+                    );
+                }
+            }
+            0x09 => {
+                //println!("maple: got get condition command");
+            }
+            _ => {
+                panic!("maple: got an unimplemented command {:08x}", cmd_id);
+            }
+        };
     }
 
-    pub fn process_maple_frame(
+    pub fn perform_maple_transfer(
         &mut self,
-        tx_frame: &MapleFrame,
+        start_offset: usize,
+        scheduler: &mut Scheduler,
         system_ram: &mut [u8],
     ) {
-        //let cmd_id = data[0] & 0xff;
-        //let port = ((data[0] & 0x30000) >> 16) as usize;
-        //let unit = ((data[0] & 0xC0) >> 6) as usize;
-
-        /*
-
-        int32 func                   ; function codes supported by this peripheral (or:ed together) (big endian)
-        int32[3] function_data       ; additional info for the supported function codes (3 max) (big endian)
-        int8 area_code               ; regional code of peripheral
-        int8 connector_direction (?) ; physical orientation of bus connection
-        char[30] product_name        ; name of peripheral
-        char[60] product_license     ; license statement
-        int16 standby_power          ; standby power consumption (little endian)
-        int16 max_power              ; maximum power consumption (little endian)
-
-         */
-        let name = "Dreamcast Controller";
-        let license = "Produced By or Under License From SEGA ENTERPRISES,LTD.";
-
-        let mut name_buffer = [0x20u8; 30];
-        let mut license_buffer = [0x20u8; 60];
-
-        // Copy the bytes from input1 to name, ensuring not to exceed the array's size.
-        let len_name = name.as_bytes().len().min(name_buffer.len());
-        name_buffer[..len_name].copy_from_slice(&name.as_bytes()[..len_name]);
-
-        // Copy the bytes from input2 to license, truncating if longer than 30 bytes.
-        let len_license = license.as_bytes().len().min(license_buffer.len());
-        license_buffer[..len_license].copy_from_slice(&license.as_bytes()[..len_license]);
-
-        let device_info = MapleDeviceInfo {
-            func: (0x01000000_u32),
-            data: [
-                // this is already big endian
-                CONT_TYPE_STANDARD_CONTROLLER,
-                0,
-                0,
-            ],
-            standby_power: 0x01ae,
-            max_power: 0x01f4,
-            region: 0xff,
-            direction: 0, // ?? idk
-            name: name_buffer,
-            license: license_buffer,
-        };
-
-        match tx_frame.cmd {
-            0x01 => Self::write_device_info(system_ram, 0, &device_info),
-            _ => panic!("maple: received unknown packet {:02x}", 0x00),
-        };
-    }
-
-    pub fn perform_maple_transfer(&mut self, scheduler: &mut Scheduler, system_ram: &mut [u8]) {
-        let mut send_offset = 0;
+        let mut send_offset = start_offset;
         loop {
             let command_header = u32::from_le_bytes([
                 system_ram[send_offset],
@@ -156,7 +163,6 @@ impl Maple {
                 system_ram[send_offset + 3],
             ]);
             send_offset += 4;
-
 
             let pattern = (command_header & 0x700) >> 8;
             let transfer_len_in_bytes = match command_header & 0xffff {
@@ -168,28 +174,70 @@ impl Maple {
             };
 
             match pattern {
-                0x00 => { // normal pattern
+                0x00 => {
+                    // normal pattern
                     let receive_address = u32::from_le_bytes([
                         system_ram[send_offset],
                         system_ram[send_offset + 1],
                         system_ram[send_offset + 2],
                         system_ram[send_offset + 3],
                     ]);
-                    
+
+                    //println!("maple: receive addr is {:08x}", receive_address-0x0c000000);
+
                     let recv_offset = (receive_address - 0x0c000000) as usize;
                     send_offset += 4;
 
                     // read out the send frame
-                    let send_frame = {
-                        let command_data = Self::as_u32_slice(&system_ram[send_offset..send_offset + transfer_len_in_bytes]);
+                    let tx_frame = {
+                        let command_data = Self::as_u32_slice(&system_ram[send_offset..]);
                         unsafe { &*(command_data.as_ptr() as *const MapleFrame) }
                     };
 
+                    //println!("received maple data:");
+                    //println!("{:02x} {:02x} {:02x} {:02x}", tx_frame.cmd, tx_frame.dest_addr, tx_frame.source_addr, tx_frame.length);
+                    let mut i = 4;
+                    for word in tx_frame.data {
+                        for b in word.to_le_bytes() {
+                            //print!("{:02x} ", b);
+                        }
+
+                        //println!("");
+                    }
+
+                    let mut rx_frame: MapleFrame = MapleFrame {
+                        cmd: 0x05,
+                        dest_addr: tx_frame.source_addr,
+                        source_addr: 0.set_bit(5).set_bit(0),
+                        length: (mem::size_of::<MapleDeviceInfo>() >> 2) as u8,
+                        data: [0; 255],
+                    };
+
                     // process cmd + write out the response
-                    self.process_maple_frame(send_frame, &mut system_ram[recv_offset..]);
+                    self.process_maple_frame(tx_frame, &mut rx_frame);
+
+                    system_ram[recv_offset] = 0x05;
+                    system_ram[recv_offset + 1] = rx_frame.dest_addr;
+                    system_ram[recv_offset + 2] = rx_frame.source_addr;
+                    system_ram[recv_offset + 3] = (mem::size_of::<MapleDeviceInfo>() >> 2) as u8;
+
+                    
+                    //println!("responding with:");
+                    //println!("{:02x} {:02x} {:02x} {:02x}", 0x05, rx_frame.dest_addr, rx_frame.source_addr, (mem::size_of::<MapleDeviceInfo>() >> 2) as u8);
+                    let mut i = 4;
+                    for word in rx_frame.data {
+                        for b in word.to_le_bytes() {
+                            system_ram[recv_offset + i] = b;
+                            i += 1;
+                            //print!("{:02x} ", b);
+                        }
+
+                        //println!("");
+                    }
+
                     send_offset += transfer_len_in_bytes;
                 }
-                0x07 => {},
+                0x07 => {}
                 _ => panic!("maple: got an unrecognized pattern {:08x}", pattern),
             };
 
@@ -198,7 +246,12 @@ impl Maple {
             }
         }
 
-        // fixme: I hope this works
-        scheduler.schedule(crate::scheduler::ScheduledEvent::HollyEvent { deadline: 20, event_data: super::HollyEventData::RaiseInterruptNormal { istnrm: 0.set_bit(12) } })
+        //println!("maple: firing end of transfer interrupt..");
+        scheduler.schedule(crate::scheduler::ScheduledEvent::HollyEvent {
+            deadline: 200,
+            event_data: super::HollyEventData::RaiseInterruptNormal {
+                istnrm: 0.set_bit(12),
+            },
+        })
     }
 }

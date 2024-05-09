@@ -1,10 +1,11 @@
 // holly block
 
 use self::{
-    g1::{
-        gdrom::GdromEventData,
-        G1Bus,
-    }, maple::Maple, pvr::Pvr, sb::SystemBlock, spg::{Spg, SpgEventData}
+    g1::{gdrom::GdromEventData, G1Bus},
+    maple::Maple,
+    pvr::Pvr,
+    sb::SystemBlock,
+    spg::{Spg, SpgEventData},
 };
 use crate::{
     context::Context,
@@ -12,12 +13,12 @@ use crate::{
     scheduler::{ScheduledEvent, Scheduler},
 };
 
-use super::sh4::{bus::PhysicalAddress, dmac::Dmac};
+use super::sh4::{bus::PhysicalAddress, dmac::Dmac, intc::InterruptKind};
 pub mod g1;
 pub mod maple;
+pub mod pvr;
 pub mod sb;
 pub mod spg;
-pub mod pvr;
 
 #[derive(Debug, Eq, PartialEq, Clone)]
 pub enum HollyEventData {
@@ -29,7 +30,7 @@ pub enum HollyEventData {
     SpgEvent(SpgEventData),
     GdromEvent(GdromEventData),
     MapleDMA,
-    Ch2DMA
+    Ch2DMA,
 }
 
 #[derive(Clone, Debug)]
@@ -93,8 +94,6 @@ impl Default for HollyRegisters {
 }
 
 pub struct Holly {
-    // fixme: move this to pvr??
-    pub vram: Vec<u8>,
     pub registers: HollyRegisters,
     pub spg: Spg,
     pub sb: SystemBlock,
@@ -103,13 +102,12 @@ pub struct Holly {
     pub frame_cyc: u64,
     pub last_line: u32,
     pub maple: Maple,
-    pub pvr: Pvr
+    pub pvr: Pvr,
 }
 
 impl Holly {
     pub fn new() -> Self {
         Self {
-            vram: vec![0; 0x3fffffff],
             registers: Default::default(),
             spg: Spg::new(),
             sb: SystemBlock::new(),
@@ -134,7 +132,7 @@ impl Holly {
     pub fn on_scheduled_event(
         &mut self,
         scheduler: &mut Scheduler,
-        dmac: &mut Dmac, // less than idea, for ch2 dma 
+        dmac: &mut Dmac, // less than idea, for ch2 dma
         ram: &mut [u8],
         event: HollyEventData,
     ) {
@@ -152,12 +150,14 @@ impl Holly {
                 self.dispatch_sh4_interrupt(scheduler);
             }
             HollyEventData::RaiseInterruptNormal { istnrm } => {
-                let prev = self.sb.registers.istnrm;
                 self.sb.registers.istnrm |= istnrm;
+
                 self.dispatch_sh4_interrupt(scheduler);
             }
             HollyEventData::RaiseInterruptExternal { istext } => {
                 self.sb.registers.istext |= istext;
+                self.sb.registers.istnrm = self.sb.registers.istnrm.eval_bit(30, self.sb.registers.istext != 0);
+
                 self.dispatch_sh4_interrupt(scheduler);
             }
             HollyEventData::LowerExternalInterrupt { istext } => {
@@ -174,34 +174,38 @@ impl Holly {
             HollyEventData::MapleDMA => {
                 // perform maple DMA
                 let start = (self.sb.registers.mdstar - 0x0c000000) as usize;
-                self.maple
-                    .perform_maple_transfer(scheduler, &mut ram[start..]);
+                self.maple.perform_maple_transfer(start, scheduler,  &mut ram[0..]);
                 self.sb.registers.mdst = 0;
             }
             HollyEventData::Ch2DMA => {
                 let source_addr = dmac.registers.sar2 & 0x1fffffff;
                 let dest_addr = self.sb.registers.c2dstat & 0x1fffffff;
-                
+
                 let mut dmac_len = dmac.registers.dmatcr2 as usize;
                 let len = self.sb.registers.c2dlen as usize;
 
                 assert_eq!(dmac_len, (len / 32) as usize); // spec says these should line up, except c2dlen is in bytes
-                
+
                 let mut ram_offset = (source_addr - 0x0c000000) as usize;
 
                 while dmac_len > 0 {
-                    let dma_data = ram[ram_offset..ram_offset+32].as_u32_slice_mut();
+                    let dma_data = ram[ram_offset..ram_offset + 32].as_u32_slice_mut();
 
-                   // println!();
-                   // Pvr::dump_ram_to_console(source_addr, &dma_data[0..].as_u8_slice_mut());
-                   // println!();
+                    // println!();
+                    // Pvr::dump_ram_to_console(source_addr, &dma_data[0..].as_u8_slice_mut());
+                    // println!();
 
                     match dest_addr {
-                        0x10000000..=0x107FFFE0 => self.pvr.receive_ta_fifo_dma_data(scheduler, dma_data),
-                        _ => panic!("holly: got ch2 dma to an unimplemented addr {:08x}", dest_addr)
+                        0x10000000..=0x107FFFE0 => {
+                            self.pvr.receive_ta_fifo_dma_data(scheduler, dma_data)
+                        }
+                        _ => {}/*panic!(
+                            "holly: got ch2 dma to an unimplemented addr {:08x}",
+                            dest_addr
+                        ),*/ 
                     }
 
-                    ram_offset += 32; 
+                    ram_offset += 32;
                     dmac_len -= 1;
                 }
 
@@ -228,29 +232,32 @@ impl Holly {
                 || (self.sb.registers.istext & self.sb.registers.iml6ext) != 0
                 || ((self.sb.registers.isterr & self.sb.registers.iml6err) != 0)) =>
             {
-                9
+                InterruptKind::IRL9 as usize
             }
             _ if ((self.sb.registers.istnrm & self.sb.registers.iml4nrm) != 0
                 || (self.sb.registers.istext & self.sb.registers.iml4ext) != 0
                 || ((self.sb.registers.isterr & self.sb.registers.iml4err) != 0)) =>
             {
-                11
+                InterruptKind::IRL11 as usize
             }
             _ if ((self.sb.registers.istnrm & self.sb.registers.iml2nrm) != 0
                 || (self.sb.registers.istext & self.sb.registers.iml2ext) != 0
                 || ((self.sb.registers.isterr & self.sb.registers.iml2err) != 0)) =>
             {
-                13
+                InterruptKind::IRL13 as usize
             }
             _ => 0,
         };
 
-        scheduler.schedule(ScheduledEvent::SH4Event {
-            deadline: 0,
-            event_data: crate::hw::sh4::SH4EventData::RaiseIRL {
-                irl_number: sh4_interrupt_line,
-            },
-        });
+        if sh4_interrupt_line != 0 {
+            //println!("raising IRL @ {}", sh4_interrupt_line);
+            scheduler.schedule(ScheduledEvent::SH4Event {
+                deadline: 0,
+                event_data: crate::hw::sh4::SH4EventData::RaiseIRL {
+                    irl_number: sh4_interrupt_line,
+                },
+            });
+        }
     }
 
     // fixme: taken from jsmoo
@@ -278,6 +285,7 @@ impl Holly {
             0x005f8040 => self.registers.border_col,
             0x005f80d0 => self.registers.sync_cfg,
             0x005f80e8 => self.registers.video_cfg,
+            0x005f8044 => self.registers.fb_r_ctrl,
             _ => {
                 #[cfg(feature = "log_io")]
                 println!("holly: unimplemented read (32-bit) @ 0x{:08x}", addr.0);
@@ -306,11 +314,17 @@ impl Holly {
             0x005f8044 => self.registers.fb_r_ctrl = value & 0x00FFFF7F,
             0x005f8048 => self.registers.fb_w_ctrl = value & 0x00FFFF0F,
             0x005f804c => self.registers.fb_render_modulo = value,
-            0x005f8050 => self.registers.fb_display_addr1 = value,
+            0x005f8050 => {
+                self.registers.fb_display_addr1 = value;
+                self.pvr.starting_offset = self.registers.fb_display_addr1;
+            }
             0x005f8054 => self.registers.fb_display_addr2 = value,
             0x005f805c => self.registers.fb_display_size = value,
             0x005f8060 => self.registers.fb_render_addr1 = value,
-            0x005f8014 => panic!("holly: got a STARTRENDER write"),
+            0x005f8014 => {
+                self.pvr.starting_offset = self.registers.fb_display_addr1;
+                self.pvr.depth = (self.registers.fb_r_ctrl & 0xC) >> 2;
+            },
             0x005f8064 => self.registers.fb_render_addr2 = value,
             0x005f8068 => self.registers.fb_clip_x = value,
             0x005f806c => self.registers.fb_clip_y = value,
@@ -351,6 +365,8 @@ impl Holly {
             0x005f8144 => self.registers.ta_init = value,
             0x005f8164 => self.registers.ta_opl_init = value,
             0x005f8098 => self.registers.isp_speed_cfg = value,
+            0x005f8020 => {}, // param base
+            0x005f802c => {}, // region base
             0x005f8200..=0x005f83ff => {
                 self.registers.fog_table[((addr.0 - 0x005f8200) / 4) as usize] = value
             }
@@ -376,18 +392,21 @@ impl Holly {
     pub fn read_8(&self, addr: PhysicalAddress) -> u8 {
         match addr.0 {
             0..=0x0023ffff => self.g1_bus.read_8(addr), // bios + flash
-            0x05000000..=0x05800000 => self.vram[(addr.0 - 0x05000000) as usize], // vram
-            0x005f7018..=0x005f709c => self.g1_bus.read_8(addr), // gdrom 
+            0x05000000..=0x05800000 => self.pvr.vram[(addr.0 - 0x05000000) as usize], // vram
+            0x04000000..=0x04800000 => {
+                self.pvr.vram[(addr.0 - 0x04000000) as usize]
+            }, // vram 64-bit
+            0x005f7018..=0x005f709c => self.g1_bus.read_8(addr), // gdrom
             _ => panic!("holly: unimplemented read (8-bit) @ 0x{:08x}", addr.0),
         }
     }
 
     pub fn write_8(&mut self, addr: PhysicalAddress, value: u8) {
         match addr.0 {
-            0x05000000..=0x05800000 => self.vram[(addr.0 - 0x05000000) as usize] = value, // vram
-            0x04000000..=0x04800000 => self.vram[(addr.0 - 0x04000000) as usize] = value, // vram 64-bit
-            0x005f7018..=0x005f709c => self.g1_bus.write_8(addr, value), // gd-rom
-            _ =>  {
+            0x05000000..=0x05800000 => self.pvr.vram[(addr.0 - 0x05000000) as usize] = value, // vram
+            0x04000000..=0x04800000 => self.pvr.vram[(addr.0 - 0x04000000) as usize] = value, // vram 64-bit
+            0x005f7018..=0x005f709c => self.g1_bus.write_8(addr, value),                  // gd-rom
+            _ => {
                 panic!(
                     "holly: unimplemented write (8-bit) @ 0x{:08x} with {:08x}",
                     addr.0, value

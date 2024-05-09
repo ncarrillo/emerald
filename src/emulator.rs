@@ -4,7 +4,7 @@ use goblin::elf::Elf;
 
 use crate::{
     context::Context,
-    hw::sh4::{bus::CpuBus, cpu::Cpu},
+    hw::sh4::{bus::CpuBus, cpu::{Cpu, Float32}},
     scheduler::Scheduler,
 };
 
@@ -36,6 +36,12 @@ impl Emulator {
         let buffer = fs::read(elf_path).unwrap();
         let elf = Elf::parse(&buffer).unwrap();
 
+        let mut i = 0;
+        for ref_byte in REF_RAM.iter() {
+            bus.write_8(0x0c000000 + i as u32, *ref_byte, context);
+            i += 1;
+        }
+        
         // place each loadable segment into RAM
         for ph in elf.program_headers.iter() {
             if ph.p_type == goblin::elf::program_header::PT_LOAD {
@@ -44,11 +50,11 @@ impl Emulator {
                 let mut offset = 0_u32;
 
                 for b in 0..ph.p_memsz {
-                    bus.write_8((ph.p_vaddr + b) as u32, 0, cpu.tracing);
+                    bus.write_8((ph.p_vaddr + b) as u32, 0, context);
                 }
 
                 for b in segment_data {
-                    bus.write_8((ph.p_vaddr as u32) + offset, *b, cpu.tracing);
+                    bus.write_8((ph.p_vaddr as u32) + offset, *b, context);
                     offset += 1;
                 }
             }
@@ -59,20 +65,28 @@ impl Emulator {
         for sym in &elf.syms {
             if let Some(name) = elf.strtab.get_at(sym.st_name) {
                 let addr = sym.st_value as u32;
-                println!("{} {:08x}", name.to_string(), addr);
                 symbol_map.insert(addr & 0x1FFFFFFF, name.to_string());
             }
         }
 
+       // panic!("");
+
         // set some initial conditions (taken from Deecy)
-        cpu.registers.pc = 0x8c010000;
+
+
         cpu.registers.current_pc = 0x8c010000;
-        cpu.registers.pending_pc = cpu.registers.pc.wrapping_add(2);
         cpu.set_register_by_index(15, 0x8c00f400);
-        cpu.set_register_by_index(0, 0x600000f0);
-        cpu.set_register_by_index(1, 0x00000808);
-        cpu.set_register_by_index(2, 0x8c00e070);
         cpu.set_register_by_index(0, 0x8c010000);
+        cpu.set_banked_register_by_index(0, 0x600000f0);
+        cpu.set_banked_register_by_index(1, 0x00000808);
+        cpu.set_banked_register_by_index(2, 0x8c00e070);
+        cpu.set_fpu_register_by_index(11, Float32 { u: 0x3f800000 });
+        cpu.set_fpu_register_by_index(9, Float32 { u: 0x80000000 });
+        cpu.set_fpu_register_by_index(8, Float32 { u: 0x80000000 });
+        cpu.set_fpu_register_by_index(7, Float32 { u: 0x3f800000 });
+        cpu.set_fpu_register_by_index(6, Float32 { u: 0x41840000 });
+        cpu.set_fpu_register_by_index(5, Float32 { u: 0x3fe66666 });
+        cpu.set_fpu_register_by_index(4, Float32 { u: 0x3f266666 });
         cpu.set_register_by_index(4, 0x8c010000);
         cpu.registers.sr = 0x600000f0;
         cpu.registers.pr = 0x8c00e09c;
@@ -80,35 +94,30 @@ impl Emulator {
         cpu.registers.fpscr = 0x00040001;
         bus.holly.sb.registers.ffst_cnt.set(245277);
 
-        bus.write_32(0x005F8044, 0x0080000D, context, cpu.tracing); // FB_R_CTRL
+        bus.write_32(0x005F8044, 0x0080000D, context); // FB_R_CTRL
 
-        for i in 0..16 {
+    /*     for i in 0..16 {
             bus.write_16(
                 0x8C0000E0 + 2 * i,
-                bus.read_16(0x800000FE - 2 * i, false, false),
-                false,
+                bus.read_16(0x800000FE - 2 * i, false, context),
+                context,
             );
         }
 
         // system ram seems to have set up the bios to these values
-        bus.write_32(0xac000074, 0x31, context, cpu.tracing);
-        bus.write_32(0xac00002c, 0x16, context, cpu.tracing);
-        bus.write_16(0x8c0090d8, 0x5113, cpu.tracing);
-        bus.write_16(0x8c00940a, 0x000b, cpu.tracing);
-        bus.write_16(0x8c00940c, 0x09, cpu.tracing);
+        bus.write_32(0xac000074, 0x31, context);
+        bus.write_32(0xac00002c, 0x16, context);
+        bus.write_16(0x8c0090d8, 0x5113, context);
+        bus.write_16(0x8c00940a, 0x000b, context);
+        bus.write_16(0x8c00940c, 0x09, context);*/
 
-        bus.write_32(0x005F8048, 6, context, cpu.tracing); // FB_W_CTRL
-        bus.write_32(0x005F8060, 0x00600000, context, cpu.tracing); // FB_W_SOF1
-        bus.write_32(0x005F8064, 0x00600000, context, cpu.tracing); // FB_W_SOF2
-        bus.write_32(0x005F8044, 0x0080000D, context, cpu.tracing); // FB_R_CTRL
-        bus.write_32(0x005F8050, 0x00200000, context, cpu.tracing); // FB_R_SOF1
-        bus.write_32(0x005F8054, 0x00200000, context, cpu.tracing); // FB_R_SOF2
+        bus.write_32(0x005F8048, 6, context); // FB_W_CTRL  
+        bus.write_32(0x005F8060, 0x00600000, context); // FB_W_SOF1
+        bus.write_32(0x005F8064, 0x00600000, context); // FB_W_SOF2
+        bus.write_32(0x005F8044, 0x0080000D, context); // FB_R_CTRL
+        bus.write_32(0x005F8050, 0x00200000, context); // FB_R_SOF1
+        bus.write_32(0x005F8054, 0x00200000, context); // FB_R_SOF2
 
-        for (index, (&item1, &item2)) in REF_RAM.iter().zip(bus.system_ram.clone().iter()).enumerate() {
-            if item1 != item2 {
-                bus.write_8(0x0c000000 + index as u32, item1, cpu.tracing);
-            }
-        }
         Ok(symbol_map)
     }
 
@@ -121,7 +130,7 @@ impl Emulator {
             bus.write_8(
                 (offset as u32).wrapping_add(i as u32),
                 IP_BIN[i],
-                cpu.tracing,
+                context,
             );
         }
 
@@ -156,18 +165,18 @@ impl Emulator {
         }
 
         // system ram seems to have set up the bios to these values
-        bus.write_32(0xac000074, 0x31, context, cpu.tracing);
-        bus.write_32(0xac00002c, 0x16, context, cpu.tracing);
-        bus.write_16(0x8c0090d8, 0x5113, cpu.tracing);
-        bus.write_16(0x8c00940a, 0x000b, cpu.tracing);
-        bus.write_16(0x8c00940c, 0x09, cpu.tracing);
+        bus.write_32(0xac000074, 0x31, context);
+        bus.write_32(0xac00002c, 0x16, context);
+        bus.write_16(0x8c0090d8, 0x5113, context);
+        bus.write_16(0x8c00940a, 0x000b, context);
+        bus.write_16(0x8c00940c, 0x09, context);
 
-        bus.write_32(0x005F8048, 6, context, cpu.tracing); // FB_W_CTRL
-        bus.write_32(0x005F8060, 0x00600000, context, cpu.tracing); // FB_W_SOF1
-        bus.write_32(0x005F8064, 0x00600000, context, cpu.tracing); // FB_W_SOF2
-        bus.write_32(0x005F8044, 0x0080000D, context, cpu.tracing); // FB_R_CTRL
-        bus.write_32(0x005F8050, 0x00200000, context, cpu.tracing); // FB_R_SOF1
-        bus.write_32(0x005F8054, 0x00200000, context, cpu.tracing); // FB_R_SOF2*/
+        bus.write_32(0x005F8048, 6, context); // FB_W_CTRL
+        bus.write_32(0x005F8060, 0x00600000, context); // FB_W_SOF1
+        bus.write_32(0x005F8064, 0x00600000, context); // FB_W_SOF2
+        bus.write_32(0x005F8044, 0x0080000D, context); // FB_R_CTRL
+        bus.write_32(0x005F8050, 0x00200000, context); // FB_R_SOF1
+        bus.write_32(0x005F8054, 0x00200000, context); // FB_R_SOF2*/
     }
 
     pub fn _load_rom(_: &mut Cpu, _: &mut Context, _: &mut CpuBus) {
@@ -178,7 +187,7 @@ impl Emulator {
             bus.write_8(
                 (offset as u32).wrapping_add(i as u32),
                 _256_BIN[i],
-                cpu.tracing,
+                context,
             );
         }
 
@@ -187,7 +196,7 @@ impl Emulator {
         cpu.registers.pending_pc = cpu.registers.pc.wrapping_add(2);
         cpu.registers.r15 = 0x8c00d400;
 
-        bus.write_32(0x005F8044, 0x0080000D, context, cpu.tracing); // FB_R_CTRL
+        bus.write_32(0x005F8044, 0x0080000D, context); // FB_R_CTRL
 
         // Copy subroutine to RAM. Some of it will be overwritten, I'm trying to work out what's important and what's not.
         for i in (0..16) {
@@ -199,24 +208,24 @@ impl Emulator {
         }
 
         // system ram seems to have set up the bios to these values
-        bus.write_32(0xac000074, 0x31, context, cpu.tracing);
-        bus.write_32(0xac00002c, 0x16, context, cpu.tracing);
-        bus.write_16(0x8c0090d8, 0x5113, cpu.tracing);
-        bus.write_16(0x8c00940a, 0x000b, cpu.tracing);
-        bus.write_16(0x8c00940c, 0x09, cpu.tracing);
+        bus.write_32(0xac000074, 0x31, context);
+        bus.write_32(0xac00002c, 0x16, context);
+        bus.write_16(0x8c0090d8, 0x5113, context);
+        bus.write_16(0x8c00940a, 0x000b, context);
+        bus.write_16(0x8c00940c, 0x09, context);
 
-        bus.write_32(0x005F8048, 6, context, cpu.tracing); // FB_W_CTRL
-        bus.write_32(0x005F8060, 0x00600000, context, cpu.tracing); // FB_W_SOF1
-        bus.write_32(0x005F8064, 0x00600000, context, cpu.tracing); // FB_W_SOF2
-        bus.write_32(0x005F8044, 0x0080000D, context, cpu.tracing); // FB_R_CTRL
-        bus.write_32(0x005F8050, 0x00200000, context, cpu.tracing); // FB_R_SOF1
-        bus.write_32(0x005F8054, 0x00200000, context, cpu.tracing); // FB_R_SOF2
+        bus.write_32(0x005F8048, 6, context); // FB_W_CTRL
+        bus.write_32(0x005F8060, 0x00600000, context); // FB_W_SOF1
+        bus.write_32(0x005F8064, 0x00600000, context); // FB_W_SOF2
+        bus.write_32(0x005F8044, 0x0080000D, context); // FB_R_CTRL
+        bus.write_32(0x005F8050, 0x00200000, context); // FB_R_SOF1
+        bus.write_32(0x005F8054, 0x00200000, context); // FB_R_SOF2
 
-        /*bus.write_32(0x005F8048, 6, self.cpu.tracing);          // FB_W_CTRL
-                bus.write_32(0x005F8060, 0x00600000, self.cpu.tracing); // FB_W_SOF1
-                bus.write_32(0x005F8064, 0x00600000, self.cpu.tracing); // FB_W_SOF2
-                bus.write_32(0x005F8050, 0x00200000, self.cpu.tracing); // FB_R_SOF1
-                bus.write_32(0x005F8054, 0x00200000, self.cpu.tracing); // FB_R_SOF2
+        /*bus.write_32(0x005F8048, 6, self.context);          // FB_W_CTRL
+                bus.write_32(0x005F8060, 0x00600000, self.context); // FB_W_SOF1
+                bus.write_32(0x005F8064, 0x00600000, self.context); // FB_W_SOF2
+                bus.write_32(0x005F8050, 0x00200000, self.context); // FB_R_SOF1
+                bus.write_32(0x005F8054, 0x00200000, self.context); // FB_R_SOF2
         */
         println!("emulator: loaded 256b.bin to ram+0x1000");*/
     }

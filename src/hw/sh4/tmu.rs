@@ -1,7 +1,7 @@
 // timers
 
-use crate::hw::extensions::BitManipulation;
-use super::bus::PhysicalAddress;
+use crate::{context::Context, hw::extensions::BitManipulation};
+use super::{bus::PhysicalAddress, intc::InterruptKind};
 
 #[derive(Copy, Default, Clone, Debug, Eq, PartialEq)]
 pub struct TmuRegisters {
@@ -30,12 +30,14 @@ impl Tmu {
     pub fn new() -> Self {
         Self {
             registers: TmuRegisters {
+                tcr0: 0x2, // fixme: should be to load_elf
+                tcr1: 0x100,
                 ..Default::default()
             },
         }
     }
 
-    pub fn tick(&mut self, cyc: u64) {
+    pub fn tick(&mut self, context: &mut Context, cyc: u64) {
         if self.registers.tstr.check_bit(0) {
             self.registers.channel_0_cycles += 1;
             let scale = match self.registers.tcr0 & 0x7 {
@@ -43,7 +45,8 @@ impl Tmu {
                 1 => 16,
                 2 => 64,
                 3 => 256,
-                _ => 1024,
+                4 => 1024,
+                _ => panic!("wtf")
             };
 
             while self.registers.channel_0_cycles >= scale {
@@ -55,7 +58,7 @@ impl Tmu {
                     self.registers.tcr0 = self.registers.tcr0.set_bit(8);
 
                     if self.registers.tcr0.check_bit(5) {
-                        // panic!("tmu: timer expected an interrupt");
+                        context.scheduler.schedule(crate::scheduler::ScheduledEvent::SH4Event { deadline: 3333333, event_data: crate::hw::sh4::SH4EventData::RaiseIRL { irl_number: InterruptKind::TUNI0 as usize } })
                     }
                 } else {
                     self.registers.tcnt0 = self.registers.tcnt0.wrapping_sub(1);
@@ -70,7 +73,8 @@ impl Tmu {
                 1 => 16,
                 2 => 64,
                 3 => 256,
-                _ => 1024,
+                4 => 1024,
+                _ => unreachable!()
             };
 
             while self.registers.channel_1_cycles >= scale {
@@ -80,9 +84,8 @@ impl Tmu {
                     
                     // signal underflow
                     self.registers.tcr1 = self.registers.tcr1.set_bit(8);
-
                     if self.registers.tcr1.check_bit(5) {
-                        // panic!("tmu: timer expected an interrupt");
+                        panic!("tmu: timer1 expected an interrupt");
                     }
                 } else {
                     self.registers.tcnt1 = self.registers.tcnt1.wrapping_sub(1);
@@ -97,7 +100,8 @@ impl Tmu {
                 1 => 16,
                 2 => 64,
                 3 => 256,
-                _ => 1024,
+                4 => 1024,
+                _ => unreachable!()
             };
 
             while self.registers.channel_2_cycles >= scale {
@@ -109,7 +113,7 @@ impl Tmu {
                     self.registers.tcr2 = self.registers.tcr2.set_bit(8);
 
                     if self.registers.tcr2.check_bit(5) {
-                        // panic!("tmu: timer expected an interrupt");
+                        context.scheduler.schedule(crate::scheduler::ScheduledEvent::SH4Event { deadline: 200, event_data: crate::hw::sh4::SH4EventData::RaiseIRL { irl_number: InterruptKind::TUNI2 as usize } })
                     }
                 } else {
                     self.registers.tcnt2 = self.registers.tcnt2.wrapping_sub(1);
@@ -136,7 +140,7 @@ impl Tmu {
     pub fn write_16(&mut self, addr: PhysicalAddress, value: u16) {
         match addr.0 {
             0x1fd80010 => {
-                self.registers.tcr0 = value
+                self.registers.tcr0 = value;
             }
             0x1fd8001c => self.registers.tcr1 = value,
             0x1fd80028 => self.registers.tcr2 = value,
@@ -162,7 +166,7 @@ impl Tmu {
         match addr.0 {
             0x1fd8000c => self.registers.tcnt0,
             0x1fd80024 => self.registers.tcnt2,
-            _ => { println!("tmu: unknown mmio read (32-bit) @ 0x{:08x}", addr.0); 0 },
+            _ => { panic!("tmu: unknown mmio read (32-bit) @ 0x{:08x}", addr.0); 0 },
         }
     }
 

@@ -10,12 +10,17 @@ use std::{ffi::c_void, io::stdout, mem};
 use context::Context;
 use emulator::Emulator;
 use hw::{holly::g1::gdi::GdiParser, sh4::bus::CpuBus};
-use sdl2::{
-    event::Event, keyboard::Keycode, libc::memcpy, pixels::PixelFormatEnum, rect::Rect,
-};
+use sdl2::{event::Event, keyboard::Keycode, libc::memcpy, pixels::PixelFormatEnum, rect::Rect};
 
 use crate::{
-    hw::{extensions::BitManipulation, sh4::SH4EventData},
+    hw::{
+        extensions::BitManipulation,
+        holly::{
+            pvr::{Vertex, VertexColor},
+            HollyEventData,
+        },
+        sh4::SH4EventData,
+    },
     scheduler::ScheduledEvent,
 };
 
@@ -36,53 +41,18 @@ fn draw_from_vram(bus: &mut CpuBus, context: &mut Context, buffer: &mut [u8]) {
 
     unsafe {
         // pointer to the vram buffer
-        let vram_ptr = (bus.holly.vram.as_mut_ptr() as *const u8).add(start_offset);
+        let vram_ptr = (bus.holly.pvr.vram.as_mut_ptr() as *const u8).add(start_offset);
         // pointer to the sdl texture
         memcpy(
             buffer.as_mut_ptr() as *mut c_void,
             vram_ptr as *mut c_void,
             buffer.len(),
         );
-        /*
-        buffer.as_mut_ptr() as *mut u32;
-        for y in 0..height {
-            // pointer to the current line in the texture
-            let mut line_ptr = texture_ptr.add(y * width);
-
-            for _ in 0..width {
-                let rgb = vram_ptr as *const u8;
-                let r: u32 = *rgb.add(0) as u32;
-                let g: u32 = *rgb.add(1) as u32;
-                let b: u32 = *rgb.add(2) as u32;
-
-                *line_ptr = (b << 16) | (g << 8) | (r) | 0xFF000000;
-
-                vram_ptr = vram_ptr.add(1);
-                line_ptr = line_ptr.add(1);
-            }
-
-            if stride > 0 {
-             //   vram_ptr = vram_ptr.add((stride - 1) as usize);
-            }
-        }*/
     }
 }
 
-const NS_PER_SEC: i64 = 1_000_000_000;
-
-fn nano_to_cycles(ns: i64, hz: i64) -> i64 {
-    ((ns as f64 / NS_PER_SEC as f64) * hz as f64) as i64
-}
-
-fn cycles_to_nano(cycles: i64, hz: i64) -> i64 {
-    ((cycles as f64 / hz as f64) * NS_PER_SEC as f64) as i64
-}
-
-fn hz_to_nano(hz: i64) -> i64 {
-    (NS_PER_SEC as f64 / hz as f64) as i64
-}
-
 pub fn main() -> Result<(), String> {
+    println!("");
     let gdi_image = GdiParser::load_from_file(
         "/Users/ncarrillo/Desktop/projects/emerald/roms/crazytaxi/ct.gdi",
     );
@@ -99,12 +69,14 @@ pub fn main() -> Result<(), String> {
     }
 
     let mut context = Context {
-        scheduler: &mut emulator.scheduler
+        scheduler: &mut emulator.scheduler,
+        cyc: 0,
+        tracing: false,
     };
 
     if true {
         //Emulator::load_ip(&mut emulator.cpu, &mut context, &mut bus);
-         let syms = Emulator::load_elf(
+        let syms = Emulator::load_elf(
             "/Users/ncarrillo/Desktop/projects/emerald/roms/pvr/example.elf",
             &mut emulator.cpu,
             &mut context,
@@ -136,26 +108,30 @@ pub fn main() -> Result<(), String> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(Keycode::X),
+                    ..
+                } => {
+                    emulator.cpu.print_thread_context(&mut bus, &mut context);
+                }
                 _ => {}
             }
         }
 
         const CYCLES_PER_FRAME: u64 = 3333333;
         let mut cycles_so_far = 0_u64;
-
-        let mut lock = stdout().lock();
         let mut time_slice = 448;
+
         while cycles_so_far < CYCLES_PER_FRAME {
             while time_slice > 0 {
-                emulator
-                    .cpu
-                    .step(&mut bus, &mut context, total_cycles, &mut lock);
-                bus.tmu.tick(total_cycles);
-
-                if !emulator.cpu.is_delay_slot {
-                    time_slice -= 8;
-                }
+                emulator.cpu.step(&mut bus, &mut context, total_cycles);
+                bus.tmu.tick(&mut context, total_cycles);
+                time_slice -= 8;
             }
+
+            emulator
+                .cpu
+                .process_interrupts(&mut bus, &mut context, total_cycles);
 
             // fixme: taken from reicast to try to align traces
             time_slice += 448;
@@ -209,7 +185,7 @@ pub fn main() -> Result<(), String> {
                 });
             }
 
-            if let Some(evt) = context.scheduler.tick() {
+            while let Some(evt) = context.scheduler.tick() {
                 match evt {
                     ScheduledEvent::SH4Event { event_data, .. } => {
                         // fixme: this processing should live somewhere? in cpu.rs? in mod.rs?
@@ -224,7 +200,7 @@ pub fn main() -> Result<(), String> {
                             context.scheduler,
                             &mut bus.dmac,
                             &mut bus.system_ram,
-                            event_data,
+                            event_data.clone(),
                         );
                     }
                 }
@@ -237,18 +213,14 @@ pub fn main() -> Result<(), String> {
         let height = (((bus.holly.registers.fb_display_size >> 10) & 0x3FF) as usize) + 1;
 
         let mut texture = tc
-            .create_texture_streaming(PixelFormatEnum::ARGB1555, width as u32, height as u32)
+            .create_texture_streaming(PixelFormatEnum::BGR555, width as u32, height as u32)
             .map_err(|e| e.to_string())?;
 
         texture.with_lock(None, |buffer: &mut [u8], _: usize| {
             draw_from_vram(&mut bus, &mut context, buffer);
         })?;
 
-        canvas.copy(
-            &texture,
-            None,
-            Some(Rect::new(0, 0, width as u32, height as u32)),
-        )?;
+        canvas.copy(&texture, None, None)?;
         canvas.present();
         canvas.window().gl_swap_window();
     }

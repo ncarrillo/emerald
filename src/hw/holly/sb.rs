@@ -170,7 +170,7 @@ impl SystemBlock {
                 self.registers.ffst.get()
             }
 
-            0x005f6900 => self.registers.istnrm.eval_bit(31, self.registers.istext != 0), // fixme: implement
+            0x005f6900 => self.registers.istnrm, // fixme: implement
             0x005f6910 => self.registers.iml2nrm,
             0x005f6914 => self.registers.iml2ext,
             0x005f6918 => self.registers.iml2err,
@@ -185,8 +185,8 @@ impl SystemBlock {
             _ => { println!("sb: unimplemented read (32-bit) @ 0x{:08x}", addr.0); 0 },
         };
 
-        #[cfg(feature = "log_io")]
-        println!("sb: reading {:08x} from addr {:08x}", ret, addr.0);
+      //  #[cfg(feature = "log_io")]
+        //println!("sb: reading {:08x} from addr {:08x}", ret, addr.0);
 
         ret
     }
@@ -261,7 +261,7 @@ impl SystemBlock {
             0x005f6884 => self.registers.lmmode0 = value & 1,
             0x005f6888 => self.registers.lmmode1 = value & 1,
             0x005f6900 => {
-                self.registers.istnrm &= !value;
+                self.registers.istnrm &= !(value & 0x3FFFFF);
                 self.pending_recalc = true;
             },
             0x005f6904 => {
@@ -320,13 +320,19 @@ impl SystemBlock {
             0x005f7408 => self.registers.gd_len = value,
             0x005f740c => self.registers.gd_dir = value,
             0x005f7414 => {
-                if value == 1 {
-                    panic!("gd-dma: start");
+                if value > 0 {
+                    panic!("gd-dma: enable");
                 }
 
                 self.registers.gd_en = value
             },
-            0x005f7418 => self.registers.gd_start = value,
+            0x005f7418 => {
+                if value > 0 {
+                    panic!("gd-dma: start");
+                }
+
+                self.registers.gd_start = value
+            },
             0x005f6800 => {
                 self.registers.c2dstat = value & 0x03FFFFE0;
                 if self.registers.c2dstat == 0 {

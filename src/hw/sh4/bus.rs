@@ -1,7 +1,7 @@
 use std::cell::Cell;
 
-use crate::{context::Context, hw::holly::Holly};
 use super::{bsc::Bsc, ccn::Ccn, cpg::Cpg, dmac::Dmac, intc::Intc, rtc::Rtc, tmu::Tmu};
+use crate::{context::Context, hw::holly::Holly};
 use std::io::{self, Write};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -28,7 +28,9 @@ impl Write for SerialBuffer {
 
         for c in str_buf.chars() {
             if c == '\n' {
+                #[cfg(feature = "log_serial")]
                 println!("{}", self.buffer);
+
                 self.buffer.clear();
             } else {
                 self.buffer.push(c);
@@ -41,6 +43,7 @@ impl Write for SerialBuffer {
     // Flushes the remaining buffer if it's not empty.
     fn flush(&mut self) -> io::Result<()> {
         if !self.buffer.is_empty() {
+            #[cfg(feature = "log_serial")]
             println!("{}", self.buffer);
             self.buffer.clear();
         }
@@ -54,7 +57,7 @@ pub enum MappedLocation {
     InternalAddress(PhysicalAddress),
     OperandCache(PhysicalAddress),
     StoreQueue(PhysicalAddress),
-    Nothing
+    Nothing,
 }
 
 impl MappedLocation {
@@ -64,7 +67,7 @@ impl MappedLocation {
             Self::InternalAddress(phys) => *phys,
             Self::OperandCache(phys) => *phys,
             Self::StoreQueue(phys) => *phys,
-            Self::Nothing => PhysicalAddress(0)
+            Self::Nothing => PhysicalAddress(0),
         }
     }
 
@@ -74,7 +77,7 @@ impl MappedLocation {
             Self::InternalAddress(_) => MappedLocation::InternalAddress(phys),
             Self::OperandCache(_) => MappedLocation::OperandCache(phys),
             Self::StoreQueue(_) => MappedLocation::StoreQueue(phys),
-            Self::Nothing => MappedLocation::Nothing
+            Self::Nothing => MappedLocation::Nothing,
         }
     }
 }
@@ -108,8 +111,7 @@ pub struct CpuBus {
     pub unk_val: u32,
     pub unk_val1: u32,
 
-    pub serial_buffer: SerialBuffer
-
+    pub serial_buffer: SerialBuffer,
 }
 
 impl CpuBus {
@@ -187,7 +189,7 @@ impl CpuBus {
         CpuBus {
             last_addr: Cell::new(0),
             last_complained: Cell::new(0),
-            spun: Cell::new(false), 
+            spun: Cell::new(false),
             armsdt: 0,
             intc: Intc::new(),
             mapper: mapper,
@@ -206,40 +208,46 @@ impl CpuBus {
             scfsr2: 0x60,
             store_queues: [[0; 8]; 2],
             system_ram: vec![0; SYSTEM_RAM_SIZE],
-            aica_ram: vec![0; 0x1FFFFF+1],
+            aica_ram: vec![0; 0x1FFFFF + 1],
             unk_val: 0,
-            unk_val1: 0
+            unk_val1: 0,
         }
     }
 
-    pub fn write_64(&mut self, addr: u32, value: u64, context: &mut Context, tracing: bool) {
-        self.write_32(addr, value as u32, context, false);
-        self.write_32(addr + 1, ((value & 0xffffffff00000000) >> 32) as u32, context, false);
+    pub fn write_64(&mut self, addr: u32, value: u64, context: &mut Context) {
+        self.write_32(addr, ((value >> 32) & 0xffffffff) as u32, context);
+        self.write_32(addr + 4, (value & 0xffffffff) as u32, context);
 
-        if tracing {
+        if context.tracing {
             println!(" write64  ({:08x}) {:016x}", addr, value);
         }
     }
 
-    pub fn write_32(&mut self, addr: u32, value: u32, context: &mut Context, tracing: bool) {
+    pub fn write_32(&mut self, addr: u32, value: u32, context: &mut Context) {
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
 
-        if tracing {
+        if context.tracing {
             println!(" write32  ({:08x}) {:08x}", addr, value);
         }
 
         match mapped_location {
             MappedLocation::ExternalAddress(physical_addr) => match physical_addr.0 {
-                0x00702c00 => self.armsdt = value, 
+                0x00702c00 => self.armsdt = value,
                 0x005f6800..=0x005f9fff => self.holly.write_32(physical_addr, value, context),
                 0x05000000..=0x05800000 => {
                     for i in 0..4 {
-                        self.holly.write_8(PhysicalAddress((physical_addr.0 + i) as u32), ((value >> (i * 8)) & 0xFF) as u8)
+                        self.holly.write_8(
+                            PhysicalAddress((physical_addr.0 + i) as u32),
+                            ((value >> (i * 8)) & 0xFF) as u8,
+                        )
                     }
                 }
                 0x04000000..=0x04800000 => {
                     for i in 0..4 {
-                        self.holly.write_8(PhysicalAddress((physical_addr.0 + i) as u32), ((value >> (i * 8)) & 0xFF) as u8)
+                        self.holly.write_8(
+                            PhysicalAddress((physical_addr.0 + i) as u32),
+                            ((value >> (i * 8)) & 0xFF) as u8,
+                        )
                     }
                 }
                 0x0c000000..=0x0cffffff => {
@@ -247,22 +255,28 @@ impl CpuBus {
                     for i in 0..4 {
                         self.system_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
                     }
-                },
+                }
                 0x0d000000..=0x0dffffff => {
                     let addr_base = (physical_addr.0 - 0x0d000000) as usize;
                     for i in 0..4 {
                         self.system_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
                     }
-                },
+                }
                 0x00800000..=0x009fffff => {
                     let addr_base = (physical_addr.0 - 0x00800000) as usize;
                     for i in 0..4 {
                         self.aica_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
                     }
-                },
-                0x00700000..=0x0071000b => {}, // fixme: aica
-                0x14000000..=0x17FFFFFF => {},
-                _ => { println!("bus: unexpected external 32-bit write to {:08x} with value {:08x}", addr, value) }
+                }
+                0x10000000..=0x13FFFFFF => self.holly.pvr.receive_ta_data(context.scheduler, value),
+                0x00700000..=0x0071000b => {} // fixme: aica
+                0x14000000..=0x17FFFFFF => {}
+                _ => {
+                    println!(
+                        "bus: unexpected external 32-bit write to {:08x} with value {:08x}",
+                        addr, value
+                    )
+                }
             },
             MappedLocation::InternalAddress(physical_addr) => match physical_addr.0 {
                 0x1f000000..=0x1f00003c => self.ccn.write_32(physical_addr, value),
@@ -274,29 +288,29 @@ impl CpuBus {
                 0x1ffffff4 => self.unk_val1 = value,
                 0x1f200000 => self.bara = value,
                 0x1f20000c => self.barb = value,
-                0x1fe80000..=0x1fe80024 => {},
-                
-                _ => panic!("bus: unexpected internal 32-bit write to {:08x} with value {:08x}", addr, value)
+                0x1fe80000..=0x1fe80024 => {}
+                _ => panic!(
+                    "bus: unexpected internal 32-bit write to {:08x} with value {:08x}",
+                    addr, value
+                ),
             },
             MappedLocation::OperandCache(physical_addr) => {
                 self.ccn.write_oc_32(physical_addr, value);
-            },
+            }
             MappedLocation::StoreQueue(physical_addr) => {
                 let addr = physical_addr.0 & 0x1FFFFFFF;
                 let sq = ((addr >> 5) & 1) as usize;
                 let idx = ((addr & 0x1c) >> 2) as usize;
-
-              //  println!("sq: got an sq{} write, entry {} with value 0x{:08x}", sq, idx, value);
                 self.store_queues[sq][idx] = value;
-            },
-            _ => {}//println!("bus: unexpected 32-bit write to {:08x} with value {:08x}", addr, value)
+            }
+            _ => {} //println!("bus: unexpected 32-bit write to {:08x} with value {:08x}", addr, value)
         }
     }
 
-    pub fn write_16(&mut self, addr: u32, value: u16, tracing: bool) {
+    pub fn write_16(&mut self, addr: u32, value: u16, context: &mut Context) {
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
 
-        if tracing {
+        if context.tracing {
             println!(" write16  ({:08x}) {:04x}", addr, value);
         }
 
@@ -305,7 +319,10 @@ impl CpuBus {
                 0x005f6800..=0x005f9fff => self.holly.write_16(physical_addr, value),
                 0x05000000..=0x05800000 => {
                     for i in 0..2 {
-                        self.holly.write_8(PhysicalAddress((physical_addr.0 + i) as u32), ((value >> (i * 8)) & 0xFF) as u8)
+                        self.holly.write_8(
+                            PhysicalAddress((physical_addr.0 + i) as u32),
+                            ((value >> (i * 8)) & 0xFF) as u8,
+                        )
                     }
                 }
                 0x0c000000..=0x0cffffff => {
@@ -313,14 +330,14 @@ impl CpuBus {
                     for i in 0..2 {
                         self.system_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
                     }
-                },
+                }
                 0x0d000000..=0x0dffffff => {
                     let addr_base = (physical_addr.0 - 0x0d000000) as usize;
                     for i in 0..2 {
                         self.system_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
                     }
-                },
-                _ => panic!("bus: unexpected 16-bit write to {:08x} with value {:04x}", addr, value)
+                }
+                _ => {} //println!("bus: unexpected 16-bit write to {:08x} with value {:04x}", addr, value); }
             },
             MappedLocation::InternalAddress(physical_addr) => match physical_addr.0 {
                 0x1f800000..=0x1f999999 => self.bsc.write_16(physical_addr, value),
@@ -328,43 +345,53 @@ impl CpuBus {
                 0x1fd00000..=0x1fd0000c => self.intc.write_16(physical_addr, value),
                 0x1fd80000..=0x1fd8002c => self.tmu.write_16(physical_addr, value),
                 0x1fc00000..=0x1fc00010 => self.cpg.write_16(physical_addr, value), // clock pulse generator
-                0x1fe80010 => {},
+                0x1fe80010 => {}
                 0x1fe80000..=0x1fe80024 => {} // scif
                 0x1f200000..=0x1f200021 => {} // break controller
 
-                0x1f000084..=0x1f000088 => {},
-                _ => panic!("bus: unexpected 16-bit write to {:08x} with value {:04x}", addr, value)
+                0x1f000084..=0x1f000088 => {}
+                _ => panic!(
+                    "bus: unexpected 16-bit write to {:08x} with value {:04x}",
+                    addr, value
+                ),
             },
             MappedLocation::OperandCache(physical_addr) => {
                 self.ccn.write_oc_16(physical_addr, value)
-            },
-            _ => panic!("bus: unexpected 16-bit write to {:08x} with value {:04x}", addr, value)
+            }
+            _ => panic!(
+                "bus: unexpected 16-bit write to {:08x} with value {:04x}",
+                addr, value
+            ),
         }
     }
 
-    pub fn write_8(&mut self, addr: u32, value: u8, tracing: bool) {
+    pub fn write_8(&mut self, addr: u32, value: u8, context: &mut Context) {
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
 
-        if tracing {
+        if context.tracing {
             println!(" write8   ({:08x}) {:02x}", addr, value);
         }
 
         match mapped_location {
             MappedLocation::ExternalAddress(physical_addr) => match physical_addr.0 {
-                // holly 
+                // holly
                 0x04000000..=0x07ffffff => self.holly.write_8(physical_addr, value),
                 0x005f6800..=0x005f9fff => self.holly.write_8(physical_addr, value),
-                
+
                 // sram + mirrors
-                0x0c000000..=0x0cffffff => self.system_ram[(physical_addr.0 - 0x0c000000) as usize] = value,
-                0x0d000000..=0x0dffffff => self.system_ram[(physical_addr.0 - 0x0d000000) as usize] = value,
+                0x0c000000..=0x0cffffff => {
+                    self.system_ram[(physical_addr.0 - 0x0c000000) as usize] = value
+                }
+                0x0d000000..=0x0dffffff => {
+                    self.system_ram[(physical_addr.0 - 0x0d000000) as usize] = value
+                }
 
                 // aica wave ram
-                0x00800000..=0x009fffff => {},
+                0x00800000..=0x009fffff => {}
                 _ => {
                     panic!(
-                        "bus: got an unknown external write (8-bit) to 0x{:08x} with {:02x} {:#?}",
-                        physical_addr.0, value, mapped_location
+                        "bus: got an unknown external write (8-bit) to 0x{:08x} with {:02x} {:#?} @ cyc {}",
+                        physical_addr.0, value, mapped_location, context.cyc
                     )
                 }
             },
@@ -375,7 +402,9 @@ impl CpuBus {
                 0x1fc00000..=0x1fc00010 => self.cpg.write_8(physical_addr, value), // clock pulse generator
 
                 // scif
-                0x1fe8000c => { write!(self.serial_buffer, "{}", value as char); },
+                0x1fe8000c => {
+                    write!(self.serial_buffer, "{}", value as char);
+                }
                 0x1fe80000..=0x1fe80024 => {} // more scif stuff, ignore for now
                 0x1f200000..=0x1f200021 => {} // break controller
                 0x1f000014 => self.basra = value,
@@ -387,39 +416,56 @@ impl CpuBus {
                     )
                 }
             },
-            MappedLocation::OperandCache(physical_addr) => self.ccn.write_oc_8(physical_addr, value),
+            MappedLocation::OperandCache(physical_addr) => {
+                self.ccn.write_oc_8(physical_addr, value)
+            }
             _ => {}
         }
     }
 
-    pub fn read_64(&self, addr: u32, tracing: bool) -> u64 {
-        let valuelo = self.read_32(addr, false) as u64;
-        let valuehi = self.read_32(addr + 1, false) as u64;
+    pub fn read_64(&self, addr: u32, context: &mut Context) -> u64 {
+        let valuelo = self.read_32(addr, context) as u64;
+        let valuehi = self.read_32(addr + 4, context) as u64;
 
-        if tracing {
-            println!(" read64   ({:08x}) {:016x}", addr, (valuehi << 32) | valuelo);
+        if context.tracing {
+            println!(
+                " read64   ({:08x}) {:016x}",
+                addr,
+                (valuehi << 32) | valuelo
+            );
         }
 
+        // Combine the two halves into a 64-bit value
         (valuehi << 32) | valuelo
     }
 
-    pub fn read_32(&self, addr: u32, tracing: bool) -> u32 {
+    pub fn read_32(&self, addr: u32, context: &mut Context) -> u32 {
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
         let value = match mapped_location {
             MappedLocation::ExternalAddress(physical_addr) => match physical_addr.0 {
-                // aica hacks to bypass trace comparison, I hope these dont matter :D 
+                // aica hacks to bypass trace comparison, I hope these dont matter :D
                 // at least the 0071xxxx ones are RTC though..
                 0x00702c00 => self.armsdt,
-                0x00710000 => 0x8bd2,
-                0x00710004 => 0x13ad,
+                0x00710000 => 0x8bd6,
+                0x00710004 => 0x4ed0,
                 0x00702040 => 0,
                 0x00702044 => 0,
                 0x00710000..=0x0071000B => 0,
-                
+                0x0c000000..=0x0cffffff => {
+                    let addr_base = (physical_addr.0 - 0x0c000000) as usize;
+                    let bytes = [
+                        self.system_ram[addr_base],
+                        self.system_ram[addr_base + 1],
+                        self.system_ram[addr_base + 2],
+                        self.system_ram[addr_base + 3],
+                    ];
+
+                    u32::from_le_bytes(bytes)
+                }
                 0x005f6800..=0x005f9fff => self.holly.read_32(physical_addr), // holly
                 _ => {
-                    let lower = self.read_16(addr, false, false) as u32;
-                    let upper = self.read_16(addr + 2, false, false) as u32;
+                    let lower = self.read_16(addr, true, context) as u32;
+                    let upper = self.read_16(addr + 2, true, context) as u32;
 
                     (upper << 16) | lower
                 }
@@ -433,10 +479,10 @@ impl CpuBus {
                 // pretty sure these are just bugs in my emulator?
                 0x1ffffff4 => self.unk_val1,
                 0x1ffffff8 => self.unk_val,
-                
+
                 _ => {
-                    let lower = self.read_16(addr, false, false) as u32;
-                    let upper = self.read_16(addr + 2, false, false) as u32;
+                    let lower = self.read_16(addr, true, context) as u32;
+                    let upper = self.read_16(addr + 2, true, context) as u32;
 
                     (upper << 16) | lower
                 }
@@ -445,22 +491,28 @@ impl CpuBus {
             _ => unimplemented!("non external addresses NYI {:#?}", mapped_location),
         };
 
-        if tracing {
+        if context.tracing {
             println!(" read32   ({:08x}) {:08x}", addr, value);
         }
 
         value
     }
 
-    pub fn read_16(&self, addr: u32, fetching: bool, tracing: bool) -> u16 {
+    pub fn read_16(&self, addr: u32, fetching: bool, context: &mut Context) -> u16 {
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
         let value = match mapped_location {
             MappedLocation::ExternalAddress(physical_addr) => match physical_addr.0 {
                 0x005f6800..=0x005f9fff => self.holly.read_16(physical_addr),
+                0x0c000000..=0x0cffffff => {
+                    let addr_base = (physical_addr.0 - 0x0c000000) as usize;
+                    let bytes = [self.system_ram[addr_base], self.system_ram[addr_base + 1]];
+
+                    u16::from_le_bytes(bytes)
+                }
                 _ => {
-                    let lower = self.read_8(addr, false) as u16;
-                    let upper = self.read_8(addr + 1, false) as u16;
-    
+                    let lower = self.read_8(addr, context) as u16;
+                    let upper = self.read_8(addr + 1, context) as u16;
+
                     (upper << 8) | lower
                 }
             },
@@ -468,38 +520,40 @@ impl CpuBus {
                 0x1f800000..=0x1f999999 => self.bsc.read_16(physical_addr), // bus state controller
                 0x1fd00000..=0x1fd0000c => self.intc.read_16(physical_addr), // interrupt controller
                 0x1fd80000..=0x1fd8002c => self.tmu.read_16(physical_addr), // timer
-                
-                // fixme: more atrocities in the name of getting traces to match.. 
+
+                // fixme: more atrocities in the name of getting traces to match..
                 0x1fe80010 => 0x60,
                 0x1f000084 | 0x1f000088 => 0,
                 0x1fe80014..=0x1fe80024 => 0,
                 _ => {
-                    let lower = self.read_8(addr, false) as u16;
-                    let upper = self.read_8(addr + 1, false) as u16;
+                    let lower = self.read_8(addr, context) as u16;
+                    let upper = self.read_8(addr + 1, context) as u16;
 
                     (upper << 8) | lower
                 }
             },
             _ => {
-                let lower = self.read_8(addr, false) as u16;
-                let upper = self.read_8(addr + 1, false) as u16;
+                let lower = self.read_8(addr, context) as u16;
+                let upper = self.read_8(addr + 1, context) as u16;
 
                 (upper << 8) | lower
             }
         };
 
-        if tracing && !fetching {
+        if context.tracing && !fetching {
             println!(" read16   ({:08x}) {:04x}", addr, value);
         }
 
         value
     }
 
-    pub fn read_8(&self, addr: u32, tracing: bool) -> u8 {
+    pub fn read_8(&self, addr: u32, context: &mut Context) -> u8 {
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
+
         let value = match mapped_location {
             MappedLocation::ExternalAddress(physical_addr) => match physical_addr.0 {
                 0..=0x0023ffff => self.holly.read_8(physical_addr), // boot rom
+                0x04000000..=0x04800000 => self.holly.read_8(physical_addr), // vram
                 0x05000000..=0x05800000 => self.holly.read_8(physical_addr), // vram
                 0x005f6800..=0x005f9fff => self.holly.read_8(physical_addr), // holly
                 0x00800000..=0x009fffff => self.aica_ram[(physical_addr.0 - 0x00800000) as usize], // aica wave ram
@@ -507,7 +561,7 @@ impl CpuBus {
                 0x0c000000..=0x0cffffff => self.system_ram[(physical_addr.0 - 0x0c000000) as usize], // sram
                 0x0d000000..=0x0dffffff => self.system_ram[(physical_addr.0 - 0x0d000000) as usize], // sram mirror
                 _ => {
-                    #[cfg(feature = "log_io")]
+                    // #[cfg(feature = "log_io")]
                     panic!(
                         "bus: got an unknown external read (8-bit) to 0x{:08x}",
                         physical_addr.0
@@ -519,22 +573,21 @@ impl CpuBus {
             MappedLocation::InternalAddress(physical_addr) => match physical_addr.0 {
                 0x1f800000..=0x1f999999 => self.bsc.read_8(physical_addr), // bus state controller
                 0x1fd80000..=0x1fd8002c => self.tmu.read_8(physical_addr), // timer
-                0x1fc0000c => 0, // idk
-                _ => { 
+                0x1fc0000c => 0,                                           // idk
+                _ => {
                     panic!(
-                    "bus: got an unknown internal read (8-bit) to 0x{:08x}",
-                    physical_addr.0
-                ); 0 },
+                        "bus: got an unknown internal read (8-bit) to 0x{:08x}",
+                        physical_addr.0
+                    );
+                    0
+                }
             },
             MappedLocation::OperandCache(physical_addr) => self.ccn.read_oc_8(physical_addr),
-            MappedLocation::Nothing => {
-            //    panic!("WARN: returning 0");
-                0
-            },
-            MappedLocation::StoreQueue(_) => unreachable!()
+            MappedLocation::Nothing => 0,
+            MappedLocation::StoreQueue(_) => unreachable!(),
         };
 
-        if tracing {
+        if context.tracing {
             println!(" read8    ({:08x}) {:02x}", addr, value);
         }
 
