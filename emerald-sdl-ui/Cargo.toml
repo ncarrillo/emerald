@@ -1,0 +1,27 @@
+[package]
+name = "emerald-sdl-ui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sdl2 = "0.36.0"
+emerald-core = { path = "../emerald-core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+glob = "0.3"
+
+[features]
+log_instrs = []
+trace_instrs = []
+log_io = []
+log_bios = []
+log_instrs2 = []
+log_kos = []
+log_ints = []
+log_serial = []
+log_pvr = []
+log_sq = []
+log_dma = []
+log_gdrom = []
+log_bios_block = []
+json_tests = []
