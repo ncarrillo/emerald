@@ -610,20 +610,15 @@ impl CpuBus {
     }
 
     pub fn read_16(&self, addr: u32, fetching: bool, context: &mut Context) -> u16 {
+        #[cfg(feature = "json_tests")]
         if context.is_test_mode {
+            let test = context.current_test.clone().unwrap();
             if fetching {
-                // println!("fetching from pc @ {:#?}", addr);
-                let mut fetch_addr = if addr >= context.test_base.unwrap() {
-                    (addr - context.test_base.unwrap()) / 2
-                } else {
-                    4
-                };
-
-                if fetch_addr > 4 {
-                    fetch_addr = 4;
-                }
-
-                return context.test_opcodes[fetch_addr as usize] as u16;
+                assert_eq!(addr, test.cycles[context.cyc as usize].fetch_addr as u32);
+                return test.cycles[context.cyc as usize].fetch_val as u16;
+            } else {
+                assert_eq!(addr, test.cycles[context.cyc as usize].read_addr as u32);
+                return test.cycles[context.cyc as usize].read_val as u16;
             }
         }
 
@@ -684,8 +679,11 @@ impl CpuBus {
     }
 
     pub fn read_8(&self, addr: u32, fetching: bool, context: &mut Context) -> u8 {
+        #[cfg(feature = "json_tests")]
         if context.is_test_mode {
-            return self.flat_aspace[addr as usize];
+            let test = context.current_test.clone().unwrap();
+            assert_eq!(addr, test.cycles[context.cyc as usize].read_addr as u32);
+            return test.cycles[context.cyc as usize].read_val as u8;
         }
 
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
@@ -702,7 +700,7 @@ impl CpuBus {
                 0x0c000000..=0x0cffffff => self.system_ram[(physical_addr.0 - 0x0c000000) as usize], // sram
                 0x0d000000..=0x0dffffff => self.system_ram[(physical_addr.0 - 0x0d000000) as usize], // sram mirror
                 _ => {
-                    println!(
+                    panic!(
                         "bus: got an unknown external read (8-bit) to 0x{:08x}",
                         physical_addr.0
                     );

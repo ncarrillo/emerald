@@ -29,6 +29,7 @@ pub mod context;
 pub mod emulator;
 pub mod fifo;
 pub mod hw;
+pub mod json_tests;
 pub mod scheduler;
 
 #[repr(C)]
@@ -177,21 +178,28 @@ impl Emulator {
                 is_test_mode: false,
                 tripped_breakpoint: None,
                 callstack: CallStack::new(),
-                test_base: None,
-                test_opcodes: vec![],
+                current_test: None,
                 breakpoints: vec![],
             };
 
             if false {
                 //Emulator::load_ip(&mut emulator.cpu, &mut context, &mut bus);
                 let syms = Emulator::load_elf(
-                    "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/pvr/example.elf",
+                    "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/pvr/test.elf",
                     &mut emulator_arc.lock().unwrap().cpu,
                     &mut context,
                     &mut bus_arc.lock().unwrap(),
                 )
                 .unwrap();
                 emulator_arc.lock().unwrap().cpu.symbols_map = syms;
+            }
+
+            if false {
+                Emulator::_load_rom(
+                    &mut emulator_arc.lock().unwrap().cpu,
+                    &mut context,
+                    &mut bus_arc.lock().unwrap(),
+                );
             }
 
             let mut total_cycles = 0_u64;

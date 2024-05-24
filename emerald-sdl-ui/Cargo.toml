@@ -6,9 +6,8 @@ edition = "2021"
 [dependencies]
 sdl2 = "0.36.0"
 emerald-core = { path = "../emerald-core" }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
 glob = "0.3"
+serde_json = "1.0"
 
 [features]
 log_instrs = []

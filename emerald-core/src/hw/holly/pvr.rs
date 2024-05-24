@@ -455,6 +455,8 @@ impl Pvr {
         let r = (r * 255 / 15) * 31 / 255;
         let g = (g * 255 / 15) * 63 / 255;
         let b = (b * 255 / 15) * 31 / 255;
+
+        return 0;
     }
 
     fn rasterize_textured_triangle(

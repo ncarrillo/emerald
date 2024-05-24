@@ -1,6 +1,6 @@
 use core::fmt;
 
-use crate::{emulator::Breakpoint, scheduler::Scheduler};
+use crate::{emulator::Breakpoint, json_tests::JsonTest, scheduler::Scheduler};
 
 pub struct Context<'b> {
     pub scheduler: &'b mut Scheduler,
@@ -8,13 +8,13 @@ pub struct Context<'b> {
     pub tracing: bool,
     pub inside_int: bool,
     pub entered_main: bool,
+
     pub tripped_breakpoint: Option<Breakpoint>,
     pub breakpoints: Vec<Breakpoint>,
-
     pub callstack: CallStack,
+
     pub is_test_mode: bool,
-    pub test_base: Option<u32>,
-    pub test_opcodes: Vec<u16>,
+    pub current_test: Option<JsonTest>,
 }
 
 #[derive(Default)]
@@ -25,7 +25,7 @@ pub struct CallStack {
 impl fmt::Debug for CallStack {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         writeln!(f, "");
-        for (i, addr) in self.stack.iter().enumerate().rev() {
+        for (_, addr) in self.stack.iter().enumerate().rev() {
             writeln!(f, "    at {}", addr)?;
         }
         writeln!(f, "")

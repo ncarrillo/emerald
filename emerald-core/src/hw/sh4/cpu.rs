@@ -241,7 +241,7 @@ fn parse_bit_pattern_and_get_hex(
 ) -> Result<(HashMap<char, (usize, usize, u16)>, u16), String> {
     if bit_pattern.len() != 16 {
         return Err(String::from(format!(
-            "Bit pattern must be 16 bits long. {}",
+            "bit pattern must be 16 bits long. {}",
             bit_pattern
         )));
     }
@@ -337,10 +337,6 @@ impl Cpu {
                 "{:08x} r{} set to {:08x} @ {}",
                 self.registers.current_pc, index, value, self.cyc
             );
-        }
-
-        if value == 2894074 {
-            println!("just why?");
         }
 
         self.registers.r[index] = value;
@@ -446,13 +442,16 @@ impl Cpu {
         self.registers.fpscr
     }
 
-    pub fn set_sr(&mut self, value: u32) {
-        if value.check_bit(29) != self.registers.sr.check_bit(29) {
-            self.swap_register_banks();
-        }
+    pub fn set_sr(&mut self, mut value: u32) {
+        //value &= 0x700083F3;
 
         if false {
             println!("set sr from {:08x} to {:08x}", self.registers.sr, value);
+        }
+
+        if value.check_bit(29) != self.registers.sr.check_bit(29) {
+            //println!("cpu: swapping register banks");
+            self.swap_register_banks();
         }
 
         self.registers.sr = value;
@@ -509,7 +508,12 @@ impl Cpu {
     }
 
     pub fn set_ssr(&mut self, value: u32) {
-        self.registers.ssr = value;
+        #[cfg(feature = "json_tests")]
+        if false {
+            println!("set ssr from {:08x} to {:08x}", self.registers.ssr, value);
+        }
+
+        self.registers.ssr = value; // & 0x700083F3;
     }
 
     pub fn set_spc(&mut self, value: u32) {
@@ -725,7 +729,7 @@ impl Cpu {
                 decoding_lookup_table,
                 "0000nnnnmmmm0101",
                 Self::movws0,
-                "???"
+                "movws0"
             );
             generate_instructions!(
                 decoding_lookup_table,
@@ -737,25 +741,25 @@ impl Cpu {
                 decoding_lookup_table,
                 "11000001dddddddd",
                 Self::movwsg,
-                "???"
+                "movwsg"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "10000101mmmmdddd",
                 Self::movwl4,
-                "???"
+                "movwl4"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "11000101dddddddd",
                 Self::movwlg,
-                "???"
+                "movwlg"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "1001nnnndddddddd",
                 Self::movwi,
-                "???"
+                "movwi"
             );
             generate_instructions!(
                 decoding_lookup_table,
@@ -827,37 +831,37 @@ impl Cpu {
                 decoding_lookup_table,
                 "0110nnnnmmmm0001",
                 Self::movwl,
-                "???"
+                "movwl"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0110nnnnmmmm0101",
                 Self::movwp,
-                "???"
+                "movwp"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0010nnnnmmmm0101",
                 Self::movwm,
-                "???"
+                "movwm"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0000nnnnmmmm1101",
                 Self::movwl0,
-                "???"
+                "movwl0"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "11000000dddddddd",
                 Self::movbsg,
-                "???"
+                "movbsg"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "11000100dddddddd",
                 Self::movblg,
-                "???"
+                "movblg"
             );
             generate_instructions!(
                 decoding_lookup_table,
@@ -1025,37 +1029,37 @@ impl Cpu {
                 decoding_lookup_table,
                 "0000nnnn00011010",
                 Self::sts_macl,
-                "???"
+                "sts macl"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0000nnnn00001010",
                 Self::sts_mach,
-                "???"
+                "sts mach"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0000nnnn00101010",
                 Self::sts_pr,
-                "???"
+                "sts pr"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0100nnnn00000010",
                 Self::stsmmach,
-                "???"
+                "stsm mach"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0100nnnn00010010",
                 Self::stsmmacl,
-                "???"
+                "stsm macl"
             );
             generate_instructions!(
                 decoding_lookup_table,
                 "0000nnnn01011010",
                 Self::sts_fpul,
-                "???"
+                "sts fpul"
             );
             generate_instructions!(
                 decoding_lookup_table,
@@ -1307,7 +1311,7 @@ impl Cpu {
                 decoding_lookup_table,
                 "0100mmmm00000111",
                 Self::ldcm_sr,
-                "???"
+                "ldcm sr"
             );
             generate_instructions!(
                 decoding_lookup_table,
@@ -1659,32 +1663,39 @@ impl Cpu {
     }
 
     pub fn exec_in_test(&mut self, bus: &mut CpuBus, context: &mut Context) {
-        self.current_opcode = bus.read_16(self.registers.current_pc, true, context);
-        context.cyc = context.cyc + 1;
+        if self.state == CpuState::Running {
+            self.current_opcode = bus.read_16(self.registers.current_pc, true, context);
 
-        if let Some(decoded) = Self::instruction_lut().get(&self.current_opcode) {
-            println!(
-                "\t{:08x}: {}",
-                self.registers.current_pc, decoded.disassembly
-            );
-            (decoded.func)(self, decoded, bus, context);
-        } else {
-            println!(
-                "cpu: unimplemented opcode {:04x} @ pc {:08x} after {} instructions",
-                self.current_opcode, self.registers.current_pc, context.cyc
-            );
+            if let Some(decoded) = Self::instruction_lut().get(&self.current_opcode) {
+                if true {
+                    println!(
+                        "\t{:08x}: {}",
+                        self.registers.current_pc, decoded.disassembly
+                    );
+                }
+
+                (decoded.func)(self, decoded, bus, context);
+            } else {
+                println!(
+                    "cpu: unimplemented opcode {:04x} @ pc {:08x} after {} instructions",
+                    self.current_opcode, self.registers.current_pc, context.cyc
+                );
+            }
         }
+        context.cyc = context.cyc + 1;
     }
 
     pub fn exec_delay_slot_in_test(&mut self, bus: &mut CpuBus, context: &mut Context) {
-        self.current_opcode = bus.read_16(self.registers.current_pc, true, context);
         context.cyc = context.cyc + 1;
+        self.current_opcode = bus.read_16(self.registers.current_pc, true, context);
 
         if let Some(decoded) = Self::instruction_lut().get(&self.current_opcode) {
-            println!(
-                "\t{:08x}: {} (delay slot)",
-                self.registers.current_pc, decoded.disassembly
-            );
+            if true {
+                println!(
+                    "\t{:08x}: {} (delay slot)",
+                    self.registers.current_pc, decoded.disassembly
+                );
+            }
             (decoded.func)(self, decoded, bus, context);
         } else {
             println!(
@@ -1692,6 +1703,7 @@ impl Cpu {
                 self.current_opcode, self.registers.current_pc, context.cyc
             );
         }
+        //context.cyc = context.cyc + 1;
     }
 
     pub fn exec_next_opcode(&mut self, bus: &mut CpuBus, context: &mut Context, cyc: u64) {
@@ -1831,7 +1843,7 @@ impl Cpu {
                 //   #[cfg(feature = "log_instrs2")]
                 // writeln!(lock, "{:08x} {:04x}, {}", opcode, self.registers.current_pc, decoded.disassembly).unwrap();
             } else {
-                println!(
+                panic!(
                     "cpu: unimplemented opcode {:04x} @ pc {:08x} after {} instructions",
                     opcode,
                     self.registers.current_pc,
@@ -2301,60 +2313,55 @@ impl Cpu {
         let rm_idx = instruction.rm.unwrap();
 
         let mut sr = self.get_sr();
-        let mut rn = self.get_register_by_index(rn_idx);
-        let rm = self.get_register_by_index(rm_idx);
 
-        if false && context.entered_main {
-            println!(
-                "{:08x}: div1 start: r{} = {:08x}, r{} = {:08x} {:08x}",
-                self.registers.current_pc,
-                rn_idx,
-                rn,
-                rm_idx,
-                rm,
-                self.get_sr()
-            );
-        }
-
-        let mut q = sr.check_bit(8);
-        let old_q = q;
-        q = (0x80000000 & rn) != 0;
-        rn <<= 1;
-        rn |= if sr.check_bit(0) { 1 } else { 0 };
+        let old_q = sr.check_bit(8);
+        let mut q = (0x80000000 & self.get_register_by_index(rn_idx)) != 0;
+        self.set_register_by_index(rn_idx, self.get_register_by_index(rn_idx) << 1);
+        self.set_register_by_index(
+            rn_idx,
+            self.get_register_by_index(rn_idx) | if sr.check_bit(0) { 1 } else { 0 },
+        );
 
         let m = sr.check_bit(9);
-        let mut t = sr.check_bit(0);
 
-        let tmp0 = rn;
-        let tmp2 = rm;
-
-        let mut tmp1: bool;
+        let tmp0 = self.get_register_by_index(rn_idx);
+        let tmp2 = self.get_register_by_index(rm_idx);
+        let tmp1: bool;
 
         if !old_q {
             if !m {
-                // use wrapping_sub to handle potential underflow
-                rn = rn.wrapping_sub(tmp2);
-                tmp1 = rn > tmp0; // Check if the result is negative (underflow)
-                q = if !q { tmp1 } else { !tmp1 }
+                self.set_register_by_index(
+                    rn_idx,
+                    self.get_register_by_index(rn_idx).wrapping_sub(tmp2),
+                );
+                tmp1 = self.get_register_by_index(rn_idx) > tmp0;
+                q = if !q { tmp1 } else { !tmp1 };
             } else {
-                rn = rn.wrapping_add(tmp2);
-                tmp1 = rn < tmp0; // Check if the result is positive
-                q = if !q { !tmp1 } else { tmp1 }
+                self.set_register_by_index(
+                    rn_idx,
+                    self.get_register_by_index(rn_idx).wrapping_add(tmp2),
+                );
+                tmp1 = self.get_register_by_index(rn_idx) < tmp0;
+                q = if !q { !tmp1 } else { tmp1 };
             }
         } else {
             if !m {
-                rn = rn.wrapping_add(tmp2);
-                tmp1 = rn < tmp0;
-                q = if !q { tmp1 } else { !tmp1 }
+                self.set_register_by_index(
+                    rn_idx,
+                    self.get_register_by_index(rn_idx).wrapping_add(tmp2),
+                );
+                tmp1 = self.get_register_by_index(rn_idx) < tmp0;
+                q = if !q { tmp1 } else { !tmp1 };
             } else {
-                rn = rn.wrapping_sub(tmp2);
-                tmp1 = rn > tmp0;
-                q = if !q { !tmp1 } else { tmp1 }
+                self.set_register_by_index(
+                    rn_idx,
+                    self.get_register_by_index(rn_idx).wrapping_sub(tmp2),
+                );
+                tmp1 = self.get_register_by_index(rn_idx) > tmp0;
+                q = if !q { !tmp1 } else { tmp1 };
             }
         }
 
-        // update the register and status
-        self.set_register_by_index(rn_idx, rn as u32);
         sr = sr.eval_bit(0, q == m).eval_bit(8, q);
 
         self.set_sr(sr);
@@ -2366,9 +2373,7 @@ impl Cpu {
         let rm_idx = instruction.rm.unwrap();
         let rn_idx = instruction.rn.unwrap();
         let rm = self.get_register_by_index(rm_idx);
-        let mut rn = self.get_register_by_index(rn_idx);
-
-        rn = rm;
+        let mut rn = rm;
 
         if (rm & 0x00008000) == 0 {
             rn &= 0x0000FFFF;
@@ -4540,12 +4545,16 @@ impl Cpu {
     fn rte(&mut self, _: &DecodedInstruction, bus: &mut CpuBus, context: &mut Context) {
         let spc = self.get_spc();
         let ssr = self.get_ssr();
-        self.set_sr(ssr);
+        self.registers.sr = ssr;// & 0x700083F3;
         self.delay_slot(bus, context);
+        self.swap_register_banks();
         self.registers.current_pc = spc;
+
         context.inside_int = false;
 
-        self.process_interrupts(bus, context, 0);
+        if !context.is_test_mode {
+            self.process_interrupts(bus, context, 0)
+        };
     }
 
     fn braf(&mut self, instruction: &DecodedInstruction, bus: &mut CpuBus, context: &mut Context) {
