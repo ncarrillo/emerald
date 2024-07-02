@@ -66,13 +66,20 @@ impl Dmac {
             0x1FA0002C => self.registers.chcr2,
             0x1fa0001c => self.registers.chcr1,
             0x1fa0003c => self.registers.chcr3,
-            _ => panic!("dmac: unknown mmio read (8-bit) @ 0x{:08x}", addr.0),
+            0x1fa00040 => self.registers.dmaor,
+            _ => {
+                println!("dmac: unknown mmio read (32-bit) @ 0x{:08x}", addr.0);
+                0
+            }
         }
     }
 
     pub fn read_8(&self, addr: PhysicalAddress) -> u8 {
         match addr.0 {
-            _ => panic!("dmac: unknown mmio read (8-bit) @ 0x{:08x}", addr.0),
+            _ => {
+                println!("dmac: unknown mmio read (8-bit) @ 0x{:08x}", addr.0);
+                0
+            }
         }
     }
 }

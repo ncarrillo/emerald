@@ -1,11 +1,9 @@
 // .gdi format support
 
-use std::{fs, path::Path};
+use std::{cmp::min, fs, path::Path};
 
 use pest::Parser;
 use pest_derive::Parser;
-
-use super::gdrom::Gdrom;
 
 #[derive(Parser)]
 #[grammar = "src/hw/holly/g1/gdi.pest"]
@@ -18,13 +16,57 @@ pub struct GdiImage {
 
 #[derive(Debug, Clone)]
 pub struct Track {
-    pub fad_start: usize,
+    pub offset: usize,
     pub is_audo_track: bool,
     pub control: usize,
     pub sector_size: usize,
     pub data: Vec<u8>,
     pub number: usize,
     pub adr: u8,
+}
+
+impl Track {
+    pub fn header_size(&self) -> usize {
+        return if self.sector_size == 2352 { 0x10 } else { 0 };
+    }
+
+    pub fn load_sectors(&self, lba: u32, count: u32, dest: &mut [u8]) -> u32 {
+        let mut sector_start = ((lba - self.offset as u32) * self.sector_size as u32) as usize;
+        let mut copied: usize = 0;
+
+        match self.sector_size {
+            2048 => {
+                for _ in 0..count {
+                    let chunk_size = min(self.sector_size as usize, dest.len() - copied as usize);
+                    let dest_slice = &mut dest[copied as usize..(copied as usize + chunk_size)];
+                    let src_slice =
+                        &self.data[sector_start as usize..(sector_start as usize + chunk_size)];
+                    dest_slice.copy_from_slice(src_slice);
+                    copied += chunk_size;
+                    sector_start += chunk_size;
+                }
+            }
+            2352 => {
+                for _ in 0..count {
+                    let header = &self.data
+                        [sector_start as usize..(sector_start as usize + self.header_size())];
+                    assert!(header[0x0F] == 1 || header[0x0F] == 2);
+
+                    let data_size = if header[0x0F] == 1 { 2048 } else { 2336 };
+                    let chunk_size = min(data_size as usize, dest.len() - copied as usize);
+                    let dest_slice = &mut dest[copied..(copied + chunk_size)];
+                    let src_slice = &self.data[(sector_start + self.header_size())
+                        ..(sector_start + self.header_size() + chunk_size)];
+                    dest_slice.copy_from_slice(src_slice);
+                    copied += chunk_size;
+                    sector_start += self.sector_size;
+                }
+            }
+            _ => panic!("Unimplemented"),
+        }
+
+        copied as u32
+    }
 }
 
 #[derive(Debug, Copy, Clone)]
@@ -36,24 +78,20 @@ pub struct AreaDescriptor {
 }
 
 impl GdiImage {
-    pub fn get_descriptor_for_area(&self, area: usize) -> AreaDescriptor {
-        if area == 0 {
-            // area 0 is normal density and doesn't have actual game data.
-            // just the audio that plays when you pop the gdrom cd into a cdrom reader.
-            AreaDescriptor {
-                start_track: 1,
-                end_track: 2,
-                lead_in: 0x00,
-                lead_out: 0x4650,
-            }
-        } else {
-            AreaDescriptor {
-                start_track: 3,
-                end_track: self.tracks.len() - 1,
-                lead_in: 0xb05e,
-                lead_out: 0x861b4,
-            }
+    pub fn get_corresponding_track(&self, lda: u32) -> &Track {
+        assert!(self.tracks.len() > 0, "tracks list is empty");
+
+        let mut idx: usize = 0;
+        while idx + 1 < self.tracks.len() && self.tracks[idx + 1].offset <= lda as usize {
+            idx += 1;
         }
+
+        &self.tracks[usize::max(0, idx)]
+    }
+
+    pub fn load_sectors(&self, lba: u32, count: u32, dest: &mut [u8]) -> u32 {
+        let track = self.get_corresponding_track(lba);
+        return track.load_sectors(lba, count, dest);
     }
 }
 
@@ -84,7 +122,7 @@ impl GdiParser {
 
                     tracks.push(Track {
                         number: i,
-                        fad_start: Gdrom::lba_to_fad(beginning_lba), // fad is just lba + pregap,
+                        offset: beginning_lba + 150,
                         is_audo_track: track_type == 0,
                         control: if track_type == 4 { 4 } else { 0 },
                         adr: 1,
@@ -97,6 +135,7 @@ impl GdiParser {
             }
         }
 
+        //  panic!("");
         GdiImage { tracks: tracks }
     }
 }

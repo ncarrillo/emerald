@@ -1,16 +1,18 @@
-pub mod cpu;
-pub mod ccn;
 pub mod bsc;
-pub mod tmu;
-pub mod rtc;
-pub mod cpg;
-pub mod dmac;
 pub mod bus;
+pub mod ccn;
+pub mod cpg;
+pub mod cpu;
+pub mod decoder;
+pub mod dmac;
+pub mod fpu;
 pub mod intc;
+pub mod rtc;
+pub mod tmu;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum SH4EventData {
-  RaiseIRL { irl_number: usize}
+    RaiseIRL { irl_number: usize },
 }
 
 // fixme: would be nice to have a module ot hang sh4 components off of so we can get them out of bus.rs

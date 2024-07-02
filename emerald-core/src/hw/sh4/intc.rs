@@ -165,17 +165,15 @@ impl Intc {
 
     pub fn raise_irl(&mut self, irl: usize) {
         self.registers.interrupt_requests |= 1_u64 << self.interrupt_map[irl];
-    }   
+    }
 
     pub fn recalc_prio(&mut self) {
-
-
-      //  println!("pre-prio: {:#?}", self.prioritized_interrupts);
+        //  println!("pre-prio: {:#?}", self.prioritized_interrupts);
 
         let len = self.prioritized_interrupts.len();
         let mut saved_requests: u64 = 0;
         if self.registers.interrupt_requests != 0 {
-            for i in (0..len) {
+            for i in 0..len {
                 if (self.registers.interrupt_requests >> i) & 1 == 1 {
                     saved_requests |= 1_u64 << self.prioritized_interrupts[i] as isize;
                 }
@@ -185,7 +183,8 @@ impl Intc {
         let IPRA = self.registers.ipra;
         let IPRC = self.registers.iprc;
 
-        self.interrupt_levels[InterruptKind::TUNI0 as isize as usize] = ((IPRA & 0xf000) >> 12) as u8;
+        self.interrupt_levels[InterruptKind::TUNI0 as isize as usize] =
+            ((IPRA & 0xf000) >> 12) as u8;
         self.interrupt_levels[InterruptKind::TUNI1 as isize as usize] = ((IPRA & 0xf00) >> 8) as u8;
         self.interrupt_levels[InterruptKind::TUNI2 as isize as usize] = ((IPRA & 0xf0) >> 4) as u8;
         self.interrupt_levels[InterruptKind::TICPI2 as isize as usize] = ((IPRA & 0xf0) >> 4) as u8;
@@ -197,9 +196,11 @@ impl Intc {
             if self.interrupt_levels[*lhs as usize] == self.interrupt_levels[*rhs as usize] {
                 (*lhs as isize).cmp(&(*rhs as isize))
             } else {
-                self.interrupt_levels[*lhs as usize].cmp(&self.interrupt_levels[*rhs as usize]).reverse()
+                self.interrupt_levels[*lhs as usize]
+                    .cmp(&self.interrupt_levels[*rhs as usize])
+                    .reverse()
             }
-        });        
+        });
 
         for i in 0..len {
             self.interrupt_map[self.prioritized_interrupts[i] as usize] = i as u8;
@@ -220,28 +221,31 @@ impl Intc {
     // fixme: recalculate priorities
     pub fn write_16(&mut self, addr: PhysicalAddress, value: u16) {
         match addr.0 {
+            // unknown, but probably not important
+            0x1fd00002 | 0x1fd00006 | 0x1fd0000a | 0x1fd0000e => {}
+
             0x1fd00000 => {
                 self.registers.icr = value;
-            },
+            }
             0x1fd00004 => {
                 if self.registers.ipra != value {
                     self.registers.ipra = value;
                     self.recalc_prio();
                 }
-            },
+            }
             0x1fd00008 => {
                 if self.registers.iprb != value {
                     self.registers.iprb = value;
                     self.recalc_prio();
                 }
-            },
+            }
             0x1fd0000c => {
                 if self.registers.iprc != value {
                     self.registers.iprc = value;
                     self.recalc_prio();
                 }
-            },
-            _ => panic!(
+            }
+            _ => println!(
                 "intc: unknown mmio write (16-bit) @ 0x{:08x} with value 0x{:08x}",
                 addr.0, value
             ),

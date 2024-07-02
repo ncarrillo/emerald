@@ -2,6 +2,7 @@ use self::{boot_rom::BootROM, gdrom::Gdrom};
 use crate::{context::Context, hw::sh4::bus::PhysicalAddress};
 
 pub mod boot_rom;
+pub mod cdi;
 pub mod gdi;
 pub mod gdrom;
 

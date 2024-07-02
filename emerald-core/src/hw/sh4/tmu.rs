@@ -1,7 +1,7 @@
 // timers
 
 use super::{bus::PhysicalAddress, intc::InterruptKind};
-use crate::{context::Context, hw::extensions::BitManipulation};
+use crate::{context::Context, hw::extensions::BitManipulation, scheduler::Scheduler};
 
 #[derive(Copy, Default, Clone, Debug, Eq, PartialEq)]
 pub struct TmuRegisters {
@@ -22,6 +22,11 @@ pub struct TmuRegisters {
     channel_2_cycles: u64,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TmuEventData {
+    Sync { channel: usize }, // channel
+}
+
 pub struct Tmu {
     pub registers: TmuRegisters,
 }
@@ -35,6 +40,17 @@ impl Tmu {
                 ..Default::default()
             },
         }
+    }
+
+    pub fn on_scheduled_event(
+        &mut self,
+        scheduler: &mut Scheduler,
+        r_ctrl: u32, // fixme: remove
+        target: u64,
+        overrun: u64,
+        event_data: TmuEventData,
+    ) {
+        panic!("tmu: got scheduled event!");
     }
 
     pub fn tick(&mut self, context: &mut Context) {
@@ -179,9 +195,10 @@ impl Tmu {
     pub fn read_32(&self, addr: PhysicalAddress) -> u32 {
         match addr.0 {
             0x1fd8000c => self.registers.tcnt0,
+            0x1fd80018 => self.registers.tcnt1,
             0x1fd80024 => self.registers.tcnt2,
             _ => {
-                panic!("tmu: unknown mmio read (32-bit) @ 0x{:08x}", addr.0);
+                println!("tmu: unknown mmio read (32-bit) @ 0x{:08x}", addr.0);
                 0
             }
         }
@@ -193,7 +210,7 @@ impl Tmu {
             0x1fd8001c => self.registers.tcr1,
             0x1fd80028 => self.registers.tcr2,
             _ => {
-                panic!("tmu: unknown mmio read (16-bit) @ 0x{:08x}", addr.0);
+                println!("tmu: unknown mmio read (16-bit) @ 0x{:08x}", addr.0);
                 0
             }
         }
@@ -204,7 +221,8 @@ impl Tmu {
             0x1fd80004 => self.registers.tstr,
             _ => {
                 //#[cfg(feature = "log_io")]
-                panic!("tmu: unknown mmio read (8-bit) @ 0x{:08x}", addr.0);
+                println!("tmu: unknown mmio read (8-bit) @ 0x{:08x}", addr.0);
+                0
             }
         }
     }

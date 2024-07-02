@@ -4,18 +4,34 @@
 #![feature(const_mut_refs)]
 #![feature(const_fn_floating_point_arithmetic)]
 #![feature(stmt_expr_attributes)]
+#![feature(f128)]
+#![feature(extract_if)]
+#![feature(hash_extract_if)]
+#![feature(assert_matches)]
 
+use std::collections::HashMap;
 use std::ffi::c_void;
+use std::fs::{metadata, File};
+use std::io::{Read, Write};
 use std::ops::DerefMut;
-use std::sync::MutexGuard;
+use std::sync::mpsc::Receiver;
 use std::sync::{mpsc, mpsc::Sender, Arc, Mutex};
+use std::sync::{MutexGuard, RwLock};
 use std::{ptr, thread};
 
-use crate::hw::holly::spg::SpgEventData;
+use hw::holly::g1::cdi::CdiParser;
+use hw::holly::g2::aica::arm_bus::ArmBus;
+use hw::holly::pvr::display_list::{DisplayList, DisplayListBuilder, VertexDefinition};
+use hw::holly::pvr::ta::PvrListType;
+use hw::holly::pvr::texture_cache::TextureAtlas;
+use hw::holly::spg::SpgEventData;
+use hw::holly::Holly;
+use serde::{Deserialize, Serialize};
+
 use crate::hw::holly::HollyEventData;
 use crate::scheduler::Scheduler;
 use crate::{
-    context::{CallStack, Context},
+    context::{Context},
     emulator::{Emulator, EmulatorState},
     hw::{
         extensions::BitManipulation,
@@ -29,15 +45,49 @@ pub mod context;
 pub mod emulator;
 pub mod fifo;
 pub mod hw;
-pub mod json_tests;
 pub mod scheduler;
 
+#[derive(Copy, Clone, Debug)]
 #[repr(C)]
-pub struct MutexGuardHandle {
-    guard: Option<MutexGuard<'static, CpuBus>>,
+pub enum EmulatorFrontendRequest {
+    ButtonPressed(ControllerButton),
+    ButtonReleased(ControllerButton),
+    Pause,
+    Resume,
+    SampleState,
+    ToggleWireframe,
+    RenderingDone,
+}
+
+#[repr(C)]
+pub enum EmulatorFrontendResponse {
+    RenderHwRast(
+        u32,
+        Arc<RwLock<TextureAtlas>>,
+        Arc<RwLock<Vec<u8>>>, // vram
+        Arc<RwLock<Vec<u8>>>, // pram
+        [DisplayListBuilder; 5],
+        [VertexDefinition; 4],
+    ),
+    BlitFramebuffer(Vec<u8>, u32, u32),
+}
+
+#[derive(Copy, Clone, Debug)]
+#[repr(C)]
+pub enum ControllerButton {
+    A,
+    B,
+    X,
+    Y,
+    Start,
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub enum FramebufferFormat {
     Rgb555,
     Rgb565,
@@ -45,161 +95,44 @@ pub enum FramebufferFormat {
     ARgb888, // ??
 }
 
-#[repr(C)]
-pub struct EmulatorHandle {
-    emulator: Arc<Mutex<Emulator>>,
-    bus: Arc<Mutex<CpuBus>>,
-    receiver: *mut mpsc::Receiver<RenderData>,
-}
-
-#[no_mangle]
-pub extern "C" fn emulator_alloc() -> *mut EmulatorHandle {
-    let emulator = Arc::new(Mutex::new(Emulator::new()));
-    let bus = Arc::new(Mutex::new(CpuBus::new()));
-    Box::into_raw(Box::new(EmulatorHandle {
-        emulator,
-        bus,
-        receiver: ptr::null_mut(),
-    }))
-}
-
-#[no_mangle]
-pub extern "C" fn emulator_run_loop(handle: *mut EmulatorHandle) {
-    let handle = unsafe { &mut *handle };
-    let (sender, receiver) = mpsc::channel::<RenderData>();
-    handle.receiver = Box::into_raw(Box::new(receiver));
-
-    let emulator_arc = Arc::clone(&handle.emulator);
-
-    Emulator::run_loop(emulator_arc, sender);
-}
-
-#[no_mangle]
-pub extern "C" fn emulator_try_recv(handle: *mut EmulatorHandle) -> *mut RenderData {
-    if handle.is_null() {
-        return ptr::null_mut();
-    }
-
-    let handle = unsafe { &mut *handle };
-    if handle.receiver.is_null() {
-        return ptr::null_mut();
-    }
-
-    let receiver = unsafe { &*handle.receiver };
-
-    match receiver.try_recv() {
-        Ok(received_data) => {
-            let data_ptr = Box::into_raw(Box::new(received_data));
-
-            data_ptr
-        }
-        Err(_) => ptr::null_mut(),
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn bus_lock(handle: *mut RenderData) -> *mut MutexGuardHandle {
-    if handle.is_null() {
-        return ptr::null_mut();
-    }
-
-    let handle = unsafe { &*handle };
-    let guard = handle.bus.lock().unwrap();
-
-    let raw = Box::into_raw(Box::new(MutexGuardHandle {
-        guard: Some(unsafe {
-            std::mem::transmute::<MutexGuard<'_, CpuBus>, MutexGuard<'static, CpuBus>>(guard)
-        }),
-    }));
-
-    raw
-}
-
-#[no_mangle]
-pub extern "C" fn bus_unlock(guard_handle: *mut MutexGuardHandle) {
-    if guard_handle.is_null() {
-        return;
-    }
-
-    unsafe {
-        drop(Box::from_raw(guard_handle));
-    }
-}
-
-#[no_mangle]
-pub extern "C" fn bus_get_vram(guard_handle: *mut MutexGuardHandle) -> *mut c_void {
-    if guard_handle.is_null() {
-        return ptr::null_mut();
-    }
-
-    let guard_handle = unsafe { &mut *guard_handle };
-    if let Some(guard) = &mut guard_handle.guard {
-        guard.holly.pvr.vram[guard.holly.registers.fb_display_addr1 as usize..].as_ptr()
-            as *mut c_void
-    } else {
-        ptr::null_mut()
-    }
-}
-
-#[repr(C)]
-pub struct RenderData {
-    pub bus: Arc<Mutex<CpuBus>>,
-    pub sentinel: u32,
-}
-
 impl Emulator {
-    pub fn run_loop(emulator_arc: Arc<Mutex<Self>>, frame_ready_sender: Sender<RenderData>) {
+    pub fn run_loop(
+        mut emulator: Self,
+        frame_ready_sender: Sender<EmulatorFrontendResponse>,
+        frontend_request_receiver: Receiver<EmulatorFrontendRequest>,
+    ) {
         thread::spawn(move || {
-            let bus_arc = Arc::new(Mutex::new(CpuBus::new()));
+            let mut bus = CpuBus::new();
+            //let cdi_image =
+            //  CdiParser::load_from_file("/Users/ncarrillo/Downloads/arm7wrestler.cdi");
+
             let gdi_image = GdiParser::load_from_file(
-                "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/crazytaxi/ct.gdi",
+                "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/gf/gf.gdi",
             );
 
             let mut scheduler = Scheduler::new();
 
             {
                 // initialize peripherals so they can schedule their initial events
-                bus_arc.lock().unwrap().holly.init(&mut scheduler);
-                bus_arc
-                    .lock()
-                    .unwrap()
-                    .holly
-                    .g1_bus
-                    .gd_rom
-                    .set_gdi(gdi_image);
+                bus.holly.init(&mut scheduler);
+                bus.holly.g1_bus.gd_rom.set_gdi(gdi_image);
             }
 
             let mut context = Context {
                 scheduler: &mut scheduler,
                 cyc: 0,
                 tracing: false,
-                inside_int: false,
-                entered_main: false,
-                is_test_mode: false,
-                tripped_breakpoint: None,
-                callstack: CallStack::new(),
-                current_test: None,
-                breakpoints: vec![],
             };
 
             if false {
-                //Emulator::load_ip(&mut emulator.cpu, &mut context, &mut bus);
                 let syms = Emulator::load_elf(
-                    "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/pvr/test.elf",
-                    &mut emulator_arc.lock().unwrap().cpu,
+                    "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/pvr/example.elf",
+                    &mut emulator.cpu,
                     &mut context,
-                    &mut bus_arc.lock().unwrap(),
+                    &mut bus,
                 )
                 .unwrap();
-                emulator_arc.lock().unwrap().cpu.symbols_map = syms;
-            }
-
-            if false {
-                Emulator::_load_rom(
-                    &mut emulator_arc.lock().unwrap().cpu,
-                    &mut context,
-                    &mut bus_arc.lock().unwrap(),
-                );
+                emulator.cpu.symbols_map = syms;
             }
 
             let mut total_cycles = 0_u64;
@@ -207,22 +140,103 @@ impl Emulator {
             const CPU_RATIO: u64 = 8;
             let mut time_slice = TIMESLICE;
             let mut send_frame = false;
+            let mut saw_sr = false;
+            let mut dl_id = 0;
+            let mut blit_frame = false;
 
             loop {
                 {
-                    let running = emulator_arc.lock().unwrap().state == EmulatorState::Running;
-                    let mut bus_lock = bus_arc.lock().unwrap();
-                    let mut bus = bus_lock.deref_mut();
-
+                    let running = emulator.state == EmulatorState::Running;
                     while time_slice > 0 && running {
-                        emulator_arc
-                            .lock()
-                            .unwrap()
-                            .cpu
-                            .step(&mut bus, &mut context, total_cycles);
+                        emulator.cpu.step(&mut bus, &mut context, total_cycles);
+
+                        let mut arm7bus = ArmBus {
+                            aica: &mut bus.holly.aica,
+                        };
+
+                        bus.holly.arm7tdmi.step(&mut arm7bus);
+
+                        bus.tmu.tick(&mut context);
                         time_slice -= CPU_RATIO;
                         total_cycles += CPU_RATIO;
 
+                        if let Ok(frontend_request) = frontend_request_receiver.try_recv() {
+                            match frontend_request {
+                                EmulatorFrontendRequest::ButtonPressed(controller_button) => {
+                                    match controller_button {
+                                        ControllerButton::A => bus.holly.maple.is_a_pressed = true,
+                                        ControllerButton::X => bus.holly.maple.is_x_pressed = true,
+                                        ControllerButton::Start => {
+                                            bus.holly.maple.is_start_pressed = true
+                                        }
+                                        ControllerButton::Right => {
+                                            bus.holly.maple.is_right_pressed = true
+                                        }
+                                        ControllerButton::Up => {
+                                            bus.holly.maple.is_up_pressed = true
+                                        }
+                                        ControllerButton::Down => {
+                                            bus.holly.maple.is_down_pressed = true
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                EmulatorFrontendRequest::ButtonReleased(controller_button) => {
+                                    match controller_button {
+                                        ControllerButton::A => bus.holly.maple.is_a_pressed = false,
+                                        ControllerButton::X => bus.holly.maple.is_x_pressed = false,
+                                        ControllerButton::Right => {
+                                            bus.holly.maple.is_right_pressed = false
+                                        }
+                                        ControllerButton::Start => {
+                                            bus.holly.maple.is_start_pressed = false
+                                        }
+                                        ControllerButton::Up => {
+                                            bus.holly.maple.is_up_pressed = false
+                                        }
+                                        ControllerButton::Down => {
+                                            bus.holly.maple.is_down_pressed = false
+                                        }
+                                        _ => {}
+                                    }
+                                }
+                                EmulatorFrontendRequest::ToggleWireframe => {
+                                    bus.holly.pvr.wireframe = !bus.holly.pvr.wireframe;
+                                }
+                                EmulatorFrontendRequest::RenderingDone => {
+                                    //   panic!("");
+                                    context.scheduler.schedule(
+                                        crate::scheduler::ScheduledEvent::HollyEvent {
+                                            deadline: 0,
+                                            event_data: HollyEventData::RaiseInterruptNormal {
+                                                istnrm: 0.set_bit(2),
+                                            },
+                                        },
+                                    );
+
+                                    context.scheduler.schedule(
+                                        crate::scheduler::ScheduledEvent::HollyEvent {
+                                            deadline: 0,
+                                            event_data: HollyEventData::RaiseInterruptNormal {
+                                                istnrm: 0.set_bit(1),
+                                            },
+                                        },
+                                    );
+
+                                    context.scheduler.schedule(
+                                        crate::scheduler::ScheduledEvent::HollyEvent {
+                                            deadline: 0,
+                                            event_data: HollyEventData::RaiseInterruptNormal {
+                                                istnrm: 0.set_bit(0),
+                                            },
+                                        },
+                                    );
+                                }
+                                _ => {}
+                            }
+                        }
+
+                        // fixme: see if we can move this out
                         if bus.holly.g1_bus.gd_rom.output_fifo.borrow().is_empty() {
                             // needed bc this transitions during a mutable read ....
                             if let Some(pending_state) = bus.holly.g1_bus.gd_rom.pending_state {
@@ -240,21 +254,20 @@ impl Emulator {
 
                     time_slice += TIMESLICE;
 
-                    if emulator_arc.lock().unwrap().state == EmulatorState::Running {
-                        emulator_arc.lock().unwrap().cpu.process_interrupts(
-                            &mut bus,
-                            &mut context,
-                            total_cycles,
-                        );
+                    // at this point, Reicast call UpdateSystem
+                    if emulator.state == EmulatorState::Running {
+                        emulator
+                            .cpu
+                            .process_interrupts(&mut bus, &mut context, total_cycles);
 
                         context.scheduler.add_cycles(TIMESLICE);
                         bus.holly.cyc += TIMESLICE;
 
-                        for _ in 0..TIMESLICE {
-                            bus.tmu.tick(&mut context);
-                        }
+                        for _ in 0..TIMESLICE {}
 
-                        while let Some(evt) = context.scheduler.tick() {
+                        let now = context.scheduler.now();
+                        while let Some(entry) = context.scheduler.tick() {
+                            let evt = entry.event;
                             match evt {
                                 ScheduledEvent::SH4Event { event_data, .. } => {
                                     // fixme: this processing should live somewhere? in cpu.rs? in mod.rs?
@@ -264,37 +277,71 @@ impl Emulator {
                                         }
                                     }
                                 }
-                                ScheduledEvent::HollyEvent { event_data, .. } => {
-                                    if let HollyEventData::FrameEnd = event_data {
+                                ScheduledEvent::HollyEvent {
+                                    event_data,
+                                    deadline,
+                                } => {
+                                    if let HollyEventData::FrameReady(dl_id2) = event_data {
                                         send_frame = true;
+                                        saw_sr = true;
+                                        dl_id = dl_id2;
+                                    }
+
+                                    if let HollyEventData::VBlank = event_data {
+                                        blit_frame = true;
+                                        bus.holly.framebuffer.invalidate_watches();
                                     }
 
                                     let mut dmac = bus.dmac;
                                     let mut system_ram = &mut bus.system_ram;
 
+                                    let target = deadline - entry.start;
+                                    let overrun = (now - entry.start) - target;
+
                                     bus.holly.on_scheduled_event(
                                         context.scheduler,
                                         &mut dmac,
                                         &mut system_ram,
+                                        target,
+                                        overrun,
                                         event_data.clone(),
                                     );
                                 }
                             }
                         }
-
-                        // Signal that a new frame is ready
-                        //
                     }
                 }
 
-                if send_frame {
+                if !send_frame
+                    && bus.holly.framebuffer.dirty
+                    && bus.holly.framebuffer.registers.read_ctrl.fb_enable
+                    && blit_frame
+                {
+                    bus.holly.framebuffer.dirty = false;
+                    blit_frame = false;
+                    let (vram, width, height) = bus
+                        .holly
+                        .framebuffer
+                        .render_framebuffer(&bus.holly.pvr.vram.read().unwrap());
+
                     frame_ready_sender
-                        .send(RenderData {
-                            bus: bus_arc.clone(),
-                            sentinel: 0821,
-                        })
+                        .send(EmulatorFrontendResponse::BlitFramebuffer(
+                            vram, width, height,
+                        ))
+                        .unwrap();
+                } else if send_frame {
+                    frame_ready_sender
+                        .send(EmulatorFrontendResponse::RenderHwRast(
+                            dl_id,
+                            bus.holly.pvr.texture_atlas.clone(),
+                            bus.holly.pvr.vram.clone(),
+                            bus.holly.pvr.pram.clone(),
+                            bus.holly.pvr.dlb.clone(),
+                            bus.holly.pvr.build_bg_verts(),
+                        ))
                         .unwrap();
                     send_frame = false;
+                    saw_sr = false;
                 }
             }
         });

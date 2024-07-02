@@ -10,7 +10,7 @@ pub struct Fifo<T, const N: usize = DEFAULT_FIFO_SIZE> {
 impl<T, const N: usize> Fifo<T, N> {
     pub fn new() -> Self {
         Fifo {
-            queue: VecDeque::with_capacity(N)
+            queue: VecDeque::with_capacity(N),
         }
     }
 
@@ -21,6 +21,10 @@ impl<T, const N: usize> Fifo<T, N> {
         } else {
             Err("fifo is full")
         }
+    }
+
+    pub fn items(&mut self) -> &mut [T] {
+        self.queue.make_contiguous()
     }
 
     pub fn peek(&mut self) -> Option<&T> {

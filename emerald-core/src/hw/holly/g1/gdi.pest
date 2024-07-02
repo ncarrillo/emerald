@@ -1,5 +1,5 @@
 number      = { ('0'..'9')+ }
 track_count = { number+ ~ NEWLINE }
-track_name  = { "\"" ~ (ASCII_ALPHANUMERIC | "(" | ")" | " ")+ ~ ".bin" ~ "\"" }
+track_name  = { "\""? ~ (ASCII_ALPHANUMERIC | "(" | ")" | " ")+ ~ (".bin"|".raw"|".iso") ~ "\""? }
 track_line  = { number ~ " "* ~ number ~ " " ~ number ~ " " ~ number ~ " " ~ track_name ~ " " ~ number ~ NEWLINE* }
 gdi         = { track_count ~ track_line+ }

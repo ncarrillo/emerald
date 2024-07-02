@@ -8,6 +8,13 @@ pub struct MapleRegisters {}
 
 pub struct Maple {
     registers: MapleRegisters,
+    pub is_a_pressed: bool,
+    pub is_start_pressed: bool,
+    pub is_x_pressed: bool,
+    pub is_b_pressed: bool,
+    pub is_right_pressed: bool,
+    pub is_up_pressed: bool,
+    pub is_down_pressed: bool,
 }
 
 // maple capabilities
@@ -59,6 +66,19 @@ pub struct MapleDeviceInfo {
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 #[repr(C)]
+pub struct MapleConditionResponse {
+    func: u32,
+    buttons: u16,
+    right_trigger: u8,
+    left_trigger: u8,
+    joy_x: u8,
+    joy_y: u8,
+    joy_x2: u8,
+    joy_y2: u8,
+}
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(C)]
 pub struct MapleFrame {
     cmd: u8,
     dest_addr: u8,
@@ -73,6 +93,13 @@ impl Maple {
             registers: MapleRegisters {
                 ..Default::default()
             },
+            is_a_pressed: false,
+            is_b_pressed: false,
+            is_right_pressed: false,
+            is_start_pressed: false,
+            is_x_pressed: false,
+            is_up_pressed: false,
+            is_down_pressed: false,
         }
     }
 
@@ -80,9 +107,9 @@ impl Maple {
         unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const u32, bytes.len() / 4) }
     }
 
-    pub fn process_maple_frame(&mut self, tx_frame: &MapleFrame, rx_frame: &mut MapleFrame) {
+    pub fn process_maple_frame(&mut self, tx_frame: &MapleFrame, rx_frame: &mut MapleFrame) -> u8 {
         let cmd_id = tx_frame.cmd;
-        //println!("maple: got command {:08x}", cmd_id);
+        // println!("maple: got command {:08x}", cmd_id);
 
         match cmd_id {
             0x01 => {
@@ -138,8 +165,42 @@ impl Maple {
                         mem::size_of::<MapleDeviceInfo>(),
                     );
                 }
+
+                return (mem::size_of::<MapleDeviceInfo>() >> 2) as u8;
             }
             0x09 => {
+                let condition_response = MapleConditionResponse {
+                    func: (0x01000000_u32),
+                    buttons: 0xffff
+                        .eval_bit(2, !self.is_a_pressed)
+                        .eval_bit(3, !self.is_start_pressed)
+                        .eval_bit(4, !self.is_up_pressed)
+                        .eval_bit(5, !self.is_down_pressed)
+                        .eval_bit(7, !self.is_right_pressed)
+                        .eval_bit(10, !self.is_x_pressed),
+                    right_trigger: 0,
+                    left_trigger: 0,
+                    joy_x: 0,
+                    joy_y: 0,
+                    joy_x2: 0,
+                    joy_y2: 0,
+                };
+
+                let device_info_bytes = unsafe {
+                    let ptr = &condition_response as *const MapleConditionResponse as *const u8;
+                    std::slice::from_raw_parts(ptr, std::mem::size_of::<MapleConditionResponse>())
+                };
+
+                unsafe {
+                    std::ptr::copy_nonoverlapping(
+                        device_info_bytes.as_ptr(),
+                        rx_frame.data.as_mut_ptr() as *mut u8,
+                        mem::size_of::<MapleConditionResponse>(),
+                    );
+                }
+
+                // println!("{}", self.is_right_pressed);
+                return (mem::size_of::<MapleConditionResponse>() >> 2) as u8;
             }
             _ => {
                 panic!("maple: got an unimplemented command {:08x}", cmd_id);
@@ -191,7 +252,7 @@ impl Maple {
                         unsafe { &*(command_data.as_ptr() as *const MapleFrame) }
                     };
 
-                    let mut i = 4;
+                    let i = 4;
                     let mut rx_frame: MapleFrame = MapleFrame {
                         cmd: if tx_frame.cmd == 0x01 { 0x05 } else { 0x08 },
                         dest_addr: tx_frame.source_addr,
@@ -201,12 +262,13 @@ impl Maple {
                     };
 
                     // process cmd + write out the response
-                    self.process_maple_frame(tx_frame, &mut rx_frame);
+                    let size = self.process_maple_frame(tx_frame, &mut rx_frame);
+                    rx_frame.length = size;
 
-                    system_ram[recv_offset] = 0x05;
+                    system_ram[recv_offset] = rx_frame.cmd;
                     system_ram[recv_offset + 1] = rx_frame.dest_addr;
                     system_ram[recv_offset + 2] = rx_frame.source_addr;
-                    system_ram[recv_offset + 3] = (mem::size_of::<MapleDeviceInfo>() >> 2) as u8;
+                    system_ram[recv_offset + 3] = size;
 
                     let mut i = 4;
                     for word in rx_frame.data {

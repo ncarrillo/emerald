@@ -21,6 +21,17 @@ pub enum GdromEventData {
     ProcessSPICommand(Vec<u8>),
 }
 
+#[derive(Copy, Clone, Debug, Default)]
+pub struct SectorReadContext {
+    pub sector_start: u32,      // starting sector
+    pub remaining_sectors: u32, // remaining sectors
+    pub sector_type: u32,       // sector type
+
+    // sector cache
+    pub cache_size: u32,
+    pub cache_index: usize,
+}
+
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum GdromState {
     WaitingForCommand,
@@ -57,9 +68,10 @@ pub struct Gdrom {
     pub pending_clear: Cell<bool>,
     pub pending_err: bool,
     pub pending_ack: Option<u32>,
-    pub output_fifo: RefCell<Fifo<u8, 0xffffff>>,
+    pub output_fifo: RefCell<Fifo<u8, 4294967295>>,
     pub gdi_image: Option<GdiImage>,
     pub pending_state: Option<GdromState>,
+    pub read_context: SectorReadContext,
 }
 
 #[derive(Clone, Default, Debug)]
@@ -103,6 +115,7 @@ impl Gdrom {
             registers: GdromRegisters::new(),
             pending_clear: Cell::new(false),
             pending_state: None,
+            read_context: Default::default(),
         }
     }
 
@@ -192,7 +205,7 @@ impl Gdrom {
     pub fn write_32(&mut self, addr: PhysicalAddress, value: u32) {
         match addr.0 {
             _ => {
-                panic!(
+                println!(
                     "gdrom: unimplemented write (32-bit) @ 0x{:08x} with 0x{:08x}",
                     addr.0, value
                 );
@@ -244,13 +257,26 @@ impl Gdrom {
         let val = match addr.0 {
             0x005f708c => {
                 let val = self.registers.sector_num_status as u8;
+                //    println!("GDROM: Read from SecNumber Register (v={:08x})", val);
+
                 val
             }
+            0x005f7098 => 0b10100000,
             0x005f7018 => {
+                //   println!(
+                //     "GDROM: Read From AltStatus (v={:08x})",
+                //   self.registers.status.get(),
+                // );
+
                 let stat = self.registers.status.get().set_bit(4) as u8;
                 stat
             }
             0x005f709c => {
+                //    println!(
+                //      "GDROM: STATUS [cancel int](v={:08x})",
+                //    self.registers.status.get(),
+                // );
+
                 let status = self.registers.status.get().set_bit(4) as u8;
                 context
                     .scheduler
@@ -266,7 +292,8 @@ impl Gdrom {
             0x005f7090 => self.registers.byte_count_lo,
             0x005f7094 => self.registers.byte_count_hi,
             _ => {
-                panic!("gdrom: unimplemented read (8-bit) @ 0x{:08x}", addr.0);
+                println!("gdrom: unimplemented read (8-bit) @ 0x{:08x}", addr.0);
+                0
             }
         };
 
@@ -276,6 +303,7 @@ impl Gdrom {
     pub fn write_8(&mut self, addr: PhysicalAddress, value: u8, context: &mut Context) {
         match addr.0 {
             0x005f7018 => {}
+            0x005f7098 => {}
             0x005f7084 => self.registers.features = value as u32,
             0x005f7088 => self.registers.sector_count = value as u32,
             0x005f7090 => self.registers.byte_count_lo = value,
@@ -286,7 +314,7 @@ impl Gdrom {
                 self.transition(context.scheduler, GdromState::ProcessingCommand);
             }
             _ => {
-                panic!(
+                println!(
                     "gdrom: unimplemented write (8-bit) @ 0x{:08x} with 0x{:02x}",
                     addr.0, value
                 );
@@ -317,6 +345,9 @@ impl Gdrom {
         }
 
         match cmd {
+            0x00 => {
+                self.transition(scheduler, GdromState::WaitingForCommand);
+            }
             0x08 => {
                 self.transition(scheduler, GdromState::WaitingForCommand);
             }
@@ -347,6 +378,31 @@ impl Gdrom {
         } else {
             self.transition(scheduler, next_state);
         }
+    }
+
+    pub fn reload_sector_cache(&mut self) {
+        let mut count = self.read_context.remaining_sectors;
+        if count > 32 {
+            count = 32;
+        }
+
+        self.read_context.cache_index = 0;
+        self.read_context.cache_size = count * self.read_context.sector_type;
+        self.output_fifo.borrow_mut().clear();
+
+        let mut buffer: Vec<u8> = vec![0; 2352 * count as usize];
+        let bytes_copied = self.gdi_image.as_ref().unwrap().load_sectors(
+            self.read_context.sector_start,
+            count,
+            &mut buffer,
+        );
+
+        for b in &buffer[0..bytes_copied as usize] {
+            self.output_fifo.borrow_mut().push(*b).unwrap();
+        }
+
+        self.read_context.sector_start += count;
+        self.read_context.remaining_sectors -= count;
     }
 
     pub fn process_spi_cmd(&mut self, parameters: &[u8], scheduler: &mut Scheduler) {
@@ -467,7 +523,7 @@ impl Gdrom {
                     self.output_fifo.borrow_mut().push(0x00).unwrap();
                     self.output_fifo
                         .borrow_mut()
-                        .push((self.registers.sns_key as u8))
+                        .push(self.registers.sns_key as u8)
                         .unwrap();
 
                     self.output_fifo.borrow_mut().push(0x00).unwrap();
@@ -528,7 +584,7 @@ impl Gdrom {
 
                 for i in start_track..=end_track {
                     let track = &img.tracks[i];
-                    let leading_fad = track.fad_start;
+                    let leading_fad = track.offset;
 
                     dest[4 * (track.number - 1) + 0] = ((track.control << 4) | 0x01) as u8;
                     dest[4 * (track.number - 1) + 1] = (leading_fad >> 16) as u8;
@@ -591,19 +647,105 @@ impl Gdrom {
                     .push((fad & 0xff) as u8)
                     .unwrap();
 
-                panic!("req_session is likely bugged");
+                //    panic!("req_session is likely bugged");
                 self.finalize_spi_cmd(len as usize, scheduler, GdromState::PioEnd);
             }
             0x30 => {
                 // CD_READ
-                let data_select = parameters[1] >> 4;
-                let expected_data_type = (parameters[1] & 0xe) >> 1;
-                panic!(
-                    "data select is {:02x}, expected data type is {:02x}",
-                    data_select, expected_data_type
+                let parameter_type = parameters[1] & 0x1;
+                let expected_data_type = (parameters[1] >> 1) & 0x7;
+                let data_select = (parameters[1] >> 4) & 0xf;
+
+                let mut start_addr = {
+                    if (parameter_type == 0) {
+                        ((parameters[2] as u32) << 16)
+                            | ((parameters[3] as u32) << 8)
+                            | parameters[4] as u32
+                    } else {
+                        Self::msf_to_lba(parameters[2], parameters[1], parameters[0])
+                    }
+                };
+
+                let transfer_length = ((parameters[8] as u32) << 16)
+                    | (parameters[9] as u32) << 8
+                    | (parameters[10] as u32);
+
+                assert!(parameter_type == 0); // start_addr is a FAD
+                assert!(expected_data_type == 0b010); // Mode 1
+                assert!(data_select == 0b0010); // Data (no header or subheader)
+
+                if (start_addr < 45000) {
+                    //      start_addr += 150;
+                }
+
+                // fixme: look up DMA reads in "features"
+                let mut is_dma = self.registers.features.check_bit(0);
+
+                self.read_context = SectorReadContext {
+                    sector_start: start_addr,
+                    remaining_sectors: transfer_length,
+                    sector_type: 2048,
+                    cache_size: transfer_length * 2048,
+                    cache_index: 0,
+                };
+                #[cfg(feature = "log_io")]
+                println!(
+                    "SPI_CD_READ - Sector={} Size={}/{} DMA={}",
+                    self.read_context.sector_start,
+                    transfer_length,
+                    self.read_context.sector_type,
+                    if is_dma { 1 } else { 0 },
+                );
+
+                let mut buffer: Vec<u8> = vec![0; 2352 * transfer_length as usize];
+                let mut count = transfer_length as u32;
+                if count > 32 {
+                    //   count = 32;
+                }
+
+                let bytes_copied =
+                    self.gdi_image
+                        .as_ref()
+                        .unwrap()
+                        .load_sectors(start_addr, count, &mut buffer);
+                #[cfg(feature = "log_io")]
+                println!("SPI_CD_READ - copied {} bytes", bytes_copied);
+
+                if is_dma {
+                    self.read_context.cache_size = count * self.read_context.sector_type;
+                    self.read_context.sector_start += count;
+                    self.read_context.remaining_sectors -= count;
+                }
+
+                for b in &buffer[0..bytes_copied as usize] {
+                    self.output_fifo.borrow_mut().push(*b).unwrap();
+                }
+
+                let flen = bytes_copied;
+                if !is_dma {
+                    self.finalize_spi_cmd(flen as usize, scheduler, GdromState::PioEnd)
+                }
+            }
+            0x12 => self.transition(scheduler, GdromState::FinishedProcessingPacket),
+            0x40 => {
+                let alloc_len = (parameters[4] as usize | (parameters[3] as usize) << 8) as usize;
+
+                self.output_fifo.borrow_mut().push(0);
+                self.output_fifo.borrow_mut().push(0x15);
+                for _ in 0..alloc_len - 2 {
+                    self.output_fifo.borrow_mut().push(0);
+                }
+
+                self.finalize_spi_cmd(
+                    (parameters[4] as usize | (parameters[3] as usize) << 8) as usize,
+                    scheduler,
+                    GdromState::PioEnd,
                 );
             }
-            _ => panic!("gdrom unimplemented spi command {:02x}", cmd),
+            _ => {
+                self.transition(scheduler, GdromState::FinishedProcessingPacket);
+                println!("gdrom unimplemented spi command {:02x}", cmd)
+            }
         }
     }
 
@@ -615,11 +757,15 @@ impl Gdrom {
         return fad - 150;
     }
 
+    pub fn msf_to_lba(minutes: u8, seconds: u8, frame: u8) -> u32 {
+        return (minutes as u32) * 60 * 75 + (seconds as u32) * 75 + (frame as u32);
+    }
+
     fn get_leadout(&self) -> usize {
         let last_track = self.gdi_image.as_ref().unwrap().tracks.last().unwrap();
         let sector_size = last_track.sector_size;
 
-        let offset = Self::fad_to_lba(last_track.fad_start);
+        let offset = Self::fad_to_lba(last_track.offset);
         return (last_track.data.len() / sector_size) + offset;
     }
 }

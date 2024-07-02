@@ -4,11 +4,12 @@ use std::cmp::Ordering;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ScheduledEvent {
     HollyEvent {
-        deadline: u64,
+        deadline: u64, // cycle in which the event will be consumed (not including overrun)
         event_data: HollyEventData,
     },
     SH4Event {
-        deadline: u64,
+        deadline: u64, // cycle in which the event will be consumed (not including overrun)
+        //  start: u64,    // cycle in which the event was scheduled
         event_data: SH4EventData,
     },
 }
@@ -48,21 +49,27 @@ impl ScheduledEvent {
     }
 }
 
-impl Ord for ScheduledEvent {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SchedulerEntry {
+    pub start: u64,
+    pub event: ScheduledEvent,
+}
+
+impl Ord for SchedulerEntry {
     fn cmp(&self, other: &Self) -> Ordering {
-        other.deadline().cmp(&self.deadline()) // Reverse order for min-heap behavior
+        other.event.deadline().cmp(&self.event.deadline())
     }
 }
 
-impl PartialOrd for ScheduledEvent {
+impl PartialOrd for SchedulerEntry {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        Some(self.cmp(other))
+        Some(self.cmp(&other))
     }
 }
 
 #[derive(Debug)]
 pub struct Scheduler {
-    pub events: Vec<ScheduledEvent>,
+    pub events: Vec<SchedulerEntry>,
     timestamp: u64,
 }
 
@@ -90,18 +97,21 @@ impl Scheduler {
         if !self
             .events
             .iter()
-            .any(|e| e.deadline() == new_event.deadline() && e == &new_event)
+            .any(|e| e.event.deadline() == new_event.deadline() && e.event == new_event)
         {
-            self.events.push(new_event);
-            self.events.sort_by(|a, b| b.cmp(a));
+            self.events.push(SchedulerEntry {
+                start: self.now(),
+                event: new_event,
+            });
+            self.events.sort_by(|a, b| b.cmp(&a));
         }
     }
 
-    pub fn tick(&mut self) -> Option<ScheduledEvent> {
-        if let Some(event) = self.events.first() {
-            if event.deadline() <= self.timestamp {
-                let event = self.events.remove(0);
-                return Some(event);
+    pub fn tick(&mut self) -> Option<SchedulerEntry> {
+        if let Some(entry) = self.events.first() {
+            if entry.event.deadline() <= self.timestamp {
+                let entry = self.events.remove(0);
+                return Some(entry);
             }
         }
 

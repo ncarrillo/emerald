@@ -25,11 +25,13 @@ pub struct SbRegisters {
     pub iml6err: u32, // interrupt mask leve 6 error
 
     // gd-dma
-    pub gd_starting_addr: u32,
+    pub gd_star: u32,
+    pub gd_stard: u32,
     pub gd_len: u32,
+    pub gd_lend: u32,
     pub gd_dir: u32,
     pub gd_en: u32,
-    pub gd_start: u32,
+    pub gd_st: u32,
 
     pub pdtnrm: u32,
     pub pdtext: u32,
@@ -156,9 +158,16 @@ impl SystemBlock {
             0x005f7838 => self.registers.e1_st,
             0x005f7858 => self.registers.e2_st,
             0x005f7878 => self.registers.dd_st,
-            0x005f7418 => self.registers.gd_start,
+            0x005f7418 => self.registers.gd_st,
+            0x005f74f8 => {
+                //   println!(
+                //     "sb: gd_lend read {:08x} from {:08x}",
+                //   self.registers.gd_lend, addr.0
+                //);
+                self.registers.gd_lend
+            }
             0x005f6c18 => self.registers.mdst,
-            0x005F689C => 0x0b,
+            0x005F689C => 0x0b, // sb_rev
             0x005f688c => {
                 // fifo status - match reicast to get identical traces
                 // fwiw, redream returns 0 here unconditionally.
@@ -199,8 +208,24 @@ impl SystemBlock {
         match addr.0 {
             0x005f7480 => self.registers.g1_rrc = value as u32,
             _ => {
-                panic!("sb: unimplemented write (16-bit) @ 0x{:08x}", addr.0);
+                println!("sb: unimplemented write (16-bit) @ 0x{:08x}", addr.0);
             }
+        }
+    }
+
+    fn get_gdrom_ticks(&self) -> usize {
+        let sb_gdst = self.registers.gd_st as usize;
+        let sb_gdlen = self.registers.gd_len as usize;
+        let sb_gdlend = self.registers.gd_lend as usize;
+
+        if sb_gdst & 1 != 0 {
+            if sb_gdlen - sb_gdlend > 10240 {
+                1_000_000 // Large transfers: GD-ROM transfer rate 1.8 MB/sx
+            } else {
+                std::cmp::min(10240, sb_gdlen - sb_gdlend) * 2 // Small transfers: Max G1 bus rate: 50 MHz x 16 bits
+            }
+        } else {
+            0
         }
     }
 
@@ -216,13 +241,24 @@ impl SystemBlock {
             0x005f74b4 => self.registers.g1_crdyc = value,
             0x005f74b8 => self.registers.gd_apro = value,
             0x005f7890 => self.registers.g2_dsto = value,
-            0x005f7c08 => self.registers.pdstar = value,
+            0x005f7c08 => {
+                self.registers.pdstar = value;
+                if value == 0x1 {
+                    panic!("palette DMA");
+                }
+            }
             0x005f7c08 => self.registers.pdstap = value,
             0x005f7c08 => self.registers.pdlen = value,
             0x005f7c0c => self.registers.pddir = value,
             0x005f7c10 => self.registers.pdsel = value,
             0x005f7c14 => self.registers.pden = value,
-            0x005f7c18 => self.registers.pdst = value,
+            0x005f7c18 => {
+                self.registers.pdst = value;
+
+                if value == 1 {
+                    panic!("pvr dma?");
+                }
+            }
 
             0x005f7800 => self.registers.ad_stag = value,
             0x005f7804 => self.registers.ad_star = value,
@@ -230,7 +266,17 @@ impl SystemBlock {
             0x005f780c => self.registers.ad_dir = value,
             0x005f7810 => self.registers.ad_tsel = value,
             0x005f7814 => self.registers.ad_en = value,
-            0x005f7818 => self.registers.ad_st = value,
+            0x005f7818 => {
+                self.registers.ad_st = value;
+                if value == 0x01 {
+                    context
+                        .scheduler
+                        .schedule(crate::scheduler::ScheduledEvent::HollyEvent {
+                            deadline: 0,
+                            event_data: HollyEventData::AicaDMA,
+                        });
+                }
+            }
             0x005f781c => self.registers.ad_usp = value,
 
             0x005f7820 => self.registers.e1_stag = value,
@@ -242,7 +288,12 @@ impl SystemBlock {
             // test registers, bios uses them but they do nothing
             0x005F68AC | 0x005F78A4 | 0x005F78A0 | 0x005F78A8 | 0x005F78AC | 0x005F78B0
             | 0x005F78B4 | 0x005F78B8 => {}
-            0x005f7838 => self.registers.e1_st = value,
+            0x005f7838 => {
+                self.registers.e1_st = value;
+                if value == 1 {
+                    panic!("e1_st went to 1 and idk what to do..");
+                }
+            }
             0x005f783c => self.registers.e1_usp = value,
             0x005f7840 => self.registers.e2_stag = value,
             0x005f7844 => self.registers.e2_star = value,
@@ -250,7 +301,13 @@ impl SystemBlock {
             0x005f784c => self.registers.e2_dir = value,
             0x005f7850 => self.registers.e2_tsel = value,
             0x005f7854 => self.registers.e2_en = value,
-            0x005f7858 => self.registers.e2_st = value,
+            0x005f7858 => {
+                self.registers.e2_st = value;
+
+                if value == 1 {
+                    panic!("e2_st went to 1 and idk what to do..");
+                }
+            }
             0x005f785c => self.registers.e2_usp = value,
             0x005f7860 => self.registers.dd_stag = value,
             0x005f7864 => self.registers.dd_star = value,
@@ -258,7 +315,12 @@ impl SystemBlock {
             0x005f786c => self.registers.dd_dir = value,
             0x005f7870 => self.registers.dd_tsel = value,
             0x005f7874 => self.registers.dd_en = value,
-            0x005f7878 => self.registers.dd_st = value,
+            0x005f7878 => {
+                self.registers.dd_st = value;
+                if value == 1 {
+                    panic!("dd_st went to 1 and idk what to do..");
+                }
+            }
             0x005f787c => self.registers.dd_usp = value,
             0x005f6884 => self.registers.lmmode0 = value & 1,
             0x005f6888 => self.registers.lmmode1 = value & 1,
@@ -351,27 +413,25 @@ impl SystemBlock {
             0x005f7898 => self.registers.g2_mdmto = value,
             0x005f789c => self.registers.g2_mdmw = value,
             0x005f78bc => self.registers.g2_apro = value,
-            0x005f7404 => self.registers.gd_starting_addr = value,
+            0x005f7404 => self.registers.gd_star = value,
             0x005f7408 => self.registers.gd_len = value,
             0x005f740c => self.registers.gd_dir = value,
-            0x005f7414 => {
-                if value > 0 {
-                    panic!("gd-dma: enable");
-                }
-
-                self.registers.gd_en = value
-            }
+            0x005f7414 => self.registers.gd_en = value,
+            0x005f6820 => {} // sb_sdst
             0x005f7418 => {
-                if value > 0 {
-                    panic!("gd-dma: start");
+                self.registers.gd_st |= value & 1;
+                if self.registers.gd_st == 1 {
+                    context
+                        .scheduler
+                        .schedule(crate::scheduler::ScheduledEvent::HollyEvent {
+                            deadline: 0 as u64,
+                            event_data: HollyEventData::GdromDMA,
+                        });
                 }
-
-                self.registers.gd_start = value
             }
             0x005f6800 => {
-                self.registers.c2dstat = value & 0x03FFFFE0;
+                self.registers.c2dstat = value;
                 if self.registers.c2dstat == 0 {
-                    // from spec: If 0x0000 0000 is specified for an address, 0x1000 0000 is accessed.
                     self.registers.c2dstat = 0x10000000;
                 }
             }
@@ -417,7 +477,6 @@ impl SystemBlock {
                 }
 
                 if self.registers.mdst == 1 {
-                    // fire an event to kick off maple DMA. this will cause the host to start the transfer in the maple module
                     context
                         .scheduler
                         .schedule(crate::scheduler::ScheduledEvent::HollyEvent {
@@ -435,7 +494,7 @@ impl SystemBlock {
             0x005f7c80 => self.registers.pdapro = value,
             0x005f6890 => {} // some reset reg
             _ => {
-                panic!(
+                println!(
                     "sb: unimplemented write (32-bit) @ 0x{:08x} with 0x{:08x}",
                     addr.0, value
                 );

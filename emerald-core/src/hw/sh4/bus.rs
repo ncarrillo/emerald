@@ -2,10 +2,9 @@ use std::cell::Cell;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use super::{bsc::Bsc, ccn::Ccn, cpg::Cpg, dmac::Dmac, intc::Intc, rtc::Rtc, tmu::Tmu};
-use crate::emulator::Breakpoint;
+use crate::hw::holly::g2::aica::arm_bus::ArmBus;
+use crate::scheduler::Scheduler;
 use crate::{context::Context, hw::holly::Holly};
-use chrono::TimeZone;
-use chrono::{DateTime, Datelike, Duration, Local, Utc};
 use std::io::{self, Write};
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -97,7 +96,6 @@ pub struct CpuBus {
     pub dmac: Dmac,
     pub intc: Intc,
     pub system_ram: Vec<u8>,
-    aica_ram: Vec<u8>,
     pub armsdt: u32,
     pub last_addr: Cell<u32>,
     pub last_complained: Cell<u32>,
@@ -114,9 +112,6 @@ pub struct CpuBus {
     pub scfsr2: u16,
     pub unk_val: u32,
     pub unk_val1: u32,
-    pub rtc_val: u32,
-
-    pub flat_aspace: Vec<u8>,
 
     pub serial_buffer: SerialBuffer,
 }
@@ -215,59 +210,30 @@ impl CpuBus {
             scfsr2: 0x60,
             store_queues: [[0; 8]; 2],
             system_ram: vec![0; SYSTEM_RAM_SIZE],
-            aica_ram: vec![0; 0x1FFFFF + 1],
             unk_val: 0,
             unk_val1: 0,
-            rtc_val: Self::get_rtc_now() as u32,
-            flat_aspace: vec![0; 0xffffffff],
-        }
-    }
-
-    pub fn check_bp(context: &mut Context, addr: u32, read: bool, fetch: bool, write: bool) {
-        context.tripped_breakpoint = context
-            .breakpoints
-            .iter()
-            .find(|f| {
-                if let Breakpoint::MemoryBreakpoint {
-                    addr: bp_addr,
-                    read: bp_read,
-                    write: bp_write,
-                    fetch: bp_fetch,
-                } = f
-                {
-                    *bp_addr == addr && *bp_read == read && *bp_write == write && *bp_fetch == fetch
-                } else {
-                    false
-                }
-            })
-            .cloned();
-    }
-
-    fn get_rtc_now() -> u32 {
-        let dreamcast_epoch =
-            UNIX_EPOCH - std::time::Duration::from_secs(20 * 365 * 24 * 60 * 60 + 5 * 24 * 60 * 60);
-        let now = SystemTime::now();
-        match now.duration_since(dreamcast_epoch) {
-            Ok(duration) => duration.as_secs() as u32,
-            Err(_) => 0,
         }
     }
 
     pub fn write_64(&mut self, addr: u32, value: u64, context: &mut Context) {
-        #[cfg(feature = "json_tests")]
-        if context.is_test_mode {
-            let mut i = 0;
-            for b in value.to_le_bytes() {
-                self.flat_aspace[(addr + i) as usize] = b;
-                i += 1;
+
+        let mapped_location = self.mapper.translate(LogicalAddress(addr));
+        match mapped_location {
+            MappedLocation::StoreQueue(_) => {
+                let sq_addr = addr & 0x1FFFFFFF;
+                let sq = ((sq_addr >> 5) & 1) as usize;
+                let idx = ((sq_addr & 0x1c) >> 2) as usize;
+
+                self.store_queues[sq][idx] = value as u32;
+                self.store_queues[sq][idx + 1] = (value >> 32) as u32;
             }
-            return;
+            _ => {}
         }
 
         let tracing = context.tracing;
         context.tracing = false;
-        self.write_32(addr, ((value >> 32) & 0xffffffff) as u32, context);
-        self.write_32(addr + 4, (value & 0xffffffff) as u32, context);
+        self.write_32(addr, (value & 0xffffffff) as u32, context);
+        self.write_32(addr + 4, ((value >> 32) & 0xffffffff) as u32, context);
         context.tracing = tracing;
 
         if context.tracing {
@@ -276,27 +242,42 @@ impl CpuBus {
     }
 
     pub fn write_32(&mut self, addr: u32, value: u32, context: &mut Context) {
-        #[cfg(feature = "json_tests")]
-        if context.is_test_mode {
-            let mut i = 0;
-            for b in value.to_le_bytes() {
-                self.flat_aspace[(addr + i) as usize] = b;
-                i += 1;
-            }
-            return;
-        }
-
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
-
-        if context.tracing {
-            println!(" write32  ({:08x}) {:08x}", addr, value);
-        }
 
         match mapped_location {
             MappedLocation::ExternalAddress(physical_addr) => match physical_addr.0 {
-                0x00702c00 => self.armsdt = value,
-                0x005f6800..=0x005f9fff => self.holly.write_32(physical_addr, value, context),
+                0x00702c00 => {
+                    self.armsdt = value;
+
+                    let mut arm7bus = ArmBus {
+                        aica: &mut self.holly.aica,
+                    };
+
+                    self.holly.arm7tdmi.reset(value & 1 == 0, &arm7bus);
+
+                    if (value & 0x01 == 0 && self.holly.aica.wave_ram[0] == 0x00000000) {
+                        self.holly.arm7tdmi.running = false;
+                    }
+                }
+
+                // aica
+                0x00700000..=0x0070FFFF => self.holly.write_32(physical_addr, value, context),
+                0x02700000..=0x0270FFFF => self.holly.write_32(physical_addr, value, context),
+                0x00800000..=0x00FFFFFF => self.holly.write_32(physical_addr, value, context),
+                0x02800000..=0x02FFFFFF => self.holly.write_32(physical_addr, value, context),
+
+                0xBF0030 => {} // idk, gldc writes here on swap, probably a bug??
+                0x005f6800..=0x005f8ffc => self.holly.write_32(physical_addr, value, context),
                 0x05000000..=0x05800000 => {
+                    for i in 0..4 {
+                        self.holly.write_8(
+                            PhysicalAddress((physical_addr.0 + i) as u32),
+                            ((value >> (i * 8)) & 0xFF) as u8,
+                            context,
+                        )
+                    }
+                }
+                0x005F9000..=0x005F9FFF => {
                     for i in 0..4 {
                         self.holly.write_8(
                             PhysicalAddress((physical_addr.0 + i) as u32),
@@ -327,21 +308,21 @@ impl CpuBus {
                         self.system_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
                     }
                 }
-                0x00800000..=0x009fffff => {
-                    let addr_base = (physical_addr.0 - 0x00800000) as usize;
-                    for i in 0..4 {
-                        self.aica_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
-                    }
-                }
-                0x10000000..=0x13FFFFFF => {
+                0x10000000..=0x10FFFFFF => {
                     self.holly
                         .pvr
-                        .receive_ta_data(context.scheduler, physical_addr, value)
+                        .receive_ta_data(context.scheduler, physical_addr, value);
                 }
-                0x00700000..=0x0071000b => {} // fixme: aica
+                0x11000000..=0x117FFFFF => {
+                    self.holly
+                        .pvr
+                        .receive_ta_data(context.scheduler, physical_addr, value);
+                    // self.holly.framebuffer.notify_write(physical_addr.0);
+                }
+
                 0x14000000..=0x17FFFFFF => {}
                 _ => {
-                    panic!(
+                    println!(
                         "bus: unexpected external 32-bit write to {:08x} with value {:08x}",
                         addr, value
                     )
@@ -358,7 +339,7 @@ impl CpuBus {
                 0x1f200000 => self.bara = value,
                 0x1f20000c => self.barb = value,
                 0x1fe80000..=0x1fe80024 => {}
-                _ => panic!(
+                _ => println!(
                     "bus: unexpected internal 32-bit write to {:08x} with value {:08x}",
                     addr, value
                 ),
@@ -366,12 +347,11 @@ impl CpuBus {
             MappedLocation::OperandCache(physical_addr) => {
                 self.ccn.write_oc_32(physical_addr, value);
             }
-            MappedLocation::StoreQueue(physical_addr) => {
+            MappedLocation::StoreQueue(_) => {
                 let sq_addr = addr & 0x1FFFFFFF;
                 let sq = ((sq_addr >> 5) & 1) as usize;
                 let idx = ((sq_addr & 0x1c) >> 2) as usize;
 
-                let is_pvr = sq_addr >= 0x10000000 && sq_addr <= 0x13FFFFFF;
                 self.store_queues[sq][idx] = value;
             }
             MappedLocation::Nothing => {}
@@ -379,16 +359,6 @@ impl CpuBus {
     }
 
     pub fn write_16(&mut self, addr: u32, value: u16, context: &mut Context) {
-        #[cfg(feature = "json_tests")]
-        if context.is_test_mode {
-            let mut i = 0;
-            for b in value.to_le_bytes() {
-                self.flat_aspace[(addr + i) as usize] = b;
-                i += 1;
-            }
-            return;
-        }
-
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
 
         if context.tracing {
@@ -428,14 +398,9 @@ impl CpuBus {
                         self.system_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
                     }
                 }
-                0x00800000..=0x009fffff => {
-                    let addr_base = (physical_addr.0 - 0x00800000) as usize;
-                    for i in 0..2 {
-                        self.aica_ram[addr_base + i] = ((value >> (i * 8)) & 0xFF) as u8;
-                    }
-                }
+                0x00800000..=0x009fffff => self.holly.write_16(physical_addr, value, context),
                 _ => {
-                    panic!(
+                    println!(
                         "bus: unexpected 16-bit write to {:08x} with value {:04x}",
                         addr, value
                     )
@@ -452,7 +417,7 @@ impl CpuBus {
                 0x1f200000..=0x1f200021 => {} // break controller
 
                 0x1f000084..=0x1f000088 => {}
-                _ => panic!(
+                _ => println!(
                     "bus: unexpected 16-bit write to {:08x} with value {:04x}",
                     addr, value
                 ),
@@ -460,7 +425,7 @@ impl CpuBus {
             MappedLocation::OperandCache(physical_addr) => {
                 self.ccn.write_oc_16(physical_addr, value)
             }
-            _ => panic!(
+            _ => println!(
                 "bus: unexpected 16-bit write to {:08x} with value {:04x}",
                 addr, value
             ),
@@ -468,16 +433,6 @@ impl CpuBus {
     }
 
     pub fn write_8(&mut self, addr: u32, value: u8, context: &mut Context) {
-        #[cfg(feature = "json_tests")]
-        if context.is_test_mode {
-            let mut i = 0;
-            for b in value.to_le_bytes() {
-                self.flat_aspace[(addr + i) as usize] = b;
-                i += 1;
-            }
-            return;
-        }
-
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
 
         if context.tracing {
@@ -498,13 +453,11 @@ impl CpuBus {
                     self.system_ram[(physical_addr.0 - 0x0d000000) as usize] = value;
                 }
 
-                // aica wave ram
-                0x00800000..=0x009fffff => {}
                 _ => {
-                    panic!(
-                    "bus: got an unknown external write (8-bit) to 0x{:08x} with {:02x} {:#?} @ cyc {}",
-                    physical_addr.0, value, mapped_location, context.cyc
-                    )
+                    println!(
+                     "bus: got an unknown external write (8-bit) to 0x{:08x} with {:02x} {:#?} @ cyc {}",
+                     physical_addr.0, value, mapped_location, context.cyc
+                     )
                 }
             },
             MappedLocation::InternalAddress(physical_addr) => match physical_addr.0 {
@@ -561,11 +514,15 @@ impl CpuBus {
                 // aica hacks to bypass trace comparison, I hope these dont matter :D
                 // at least the 0071xxxx ones are RTC though..
                 0x00702c00 => self.armsdt,
-                0x00710000 => ((Self::get_rtc_now() as u32) >> 16) & 0x0000FFFFF,
-                0x00710004 => (Self::get_rtc_now() as u32) & 0x0000FFFFF,
-                0x00702040 => 0,
-                0x00702044 => 0,
-                0x00710008..=0x0071000B => 0,
+                0x00710000 => ((self.holly.aica.rtc.timestamp as u32) >> 16) & 0x0000FFFFF,
+                0x00710004 => (self.holly.aica.rtc.timestamp as u32) & 0x0000FFFFF,
+
+                // aica
+                0x00700000..=0x0070FFFF => self.holly.read_32(physical_addr),
+                0x02700000..=0x0270FFFF => self.holly.read_32(physical_addr),
+                0x00800000..=0x009fffff => self.holly.read_32(physical_addr),
+                0x02800000..=0x02FFFFFf => self.holly.read_32(physical_addr),
+
                 0x0c000000..=0x0cffffff => {
                     let addr_base = (physical_addr.0 - 0x0c000000) as usize;
                     let bytes = [
@@ -575,10 +532,11 @@ impl CpuBus {
                         self.system_ram[addr_base + 3],
                     ];
 
-                    let mut value = u32::from_le_bytes(bytes);
+                    let value = u32::from_le_bytes(bytes);
                     value
                 }
                 0x005f6800..=0x005f9fff => self.holly.read_32(physical_addr), // holly
+
                 _ => {
                     let lower = self.read_16(addr, true, context) as u32;
                     let upper = self.read_16(addr + 2, true, context) as u32;
@@ -610,20 +568,7 @@ impl CpuBus {
     }
 
     pub fn read_16(&self, addr: u32, fetching: bool, context: &mut Context) -> u16 {
-        #[cfg(feature = "json_tests")]
-        if context.is_test_mode {
-            let test = context.current_test.clone().unwrap();
-            if fetching {
-                assert_eq!(addr, test.cycles[context.cyc as usize].fetch_addr as u32);
-                return test.cycles[context.cyc as usize].fetch_val as u16;
-            } else {
-                assert_eq!(addr, test.cycles[context.cyc as usize].read_addr as u32);
-                return test.cycles[context.cyc as usize].read_val as u16;
-            }
-        }
-
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
-        Self::check_bp(context, addr, !fetching, fetching, false);
 
         let value = match mapped_location {
             MappedLocation::ExternalAddress(physical_addr) => match physical_addr.0 {
@@ -634,12 +579,10 @@ impl CpuBus {
 
                     u16::from_le_bytes(bytes)
                 }
-                0x00800000..=0x009fffff => {
-                    let addr_base = (physical_addr.0 - 0x00800000) as usize;
-                    let bytes = [self.aica_ram[addr_base], self.aica_ram[addr_base + 1]];
 
-                    u16::from_le_bytes(bytes)
-                } // aica wave ram
+                0x00800000..=0x009fffff => self.holly.read_16(physical_addr, context),
+                0x02800000..=0x02FFFFFF => self.holly.read_16(physical_addr, context),
+
                 _ => {
                     let lower = self.read_8(addr, true, context) as u16;
                     let upper = self.read_8(addr + 1, true, context) as u16;
@@ -679,13 +622,6 @@ impl CpuBus {
     }
 
     pub fn read_8(&self, addr: u32, fetching: bool, context: &mut Context) -> u8 {
-        #[cfg(feature = "json_tests")]
-        if context.is_test_mode {
-            let test = context.current_test.clone().unwrap();
-            assert_eq!(addr, test.cycles[context.cyc as usize].read_addr as u32);
-            return test.cycles[context.cyc as usize].read_val as u8;
-        }
-
         let mapped_location = self.mapper.translate(LogicalAddress(addr));
 
         let value = match mapped_location {
@@ -695,15 +631,14 @@ impl CpuBus {
                 0x05000000..=0x05800000 => self.holly.read_8(physical_addr, context), // vram
                 0x07000000..=0x07800000 => self.holly.read_8(physical_addr, context), // vram
                 0x005f6800..=0x005f9fff => self.holly.read_8(physical_addr, context), // holly
-                0x00800000..=0x009fffff => self.aica_ram[(physical_addr.0 - 0x00800000) as usize], // aica wave ram
                 0x00600000..=0x006fffff => 0, // fixme: async modem area?
                 0x0c000000..=0x0cffffff => self.system_ram[(physical_addr.0 - 0x0c000000) as usize], // sram
                 0x0d000000..=0x0dffffff => self.system_ram[(physical_addr.0 - 0x0d000000) as usize], // sram mirror
                 _ => {
-                    panic!(
-                        "bus: got an unknown external read (8-bit) to 0x{:08x}",
-                        physical_addr.0
-                    );
+                    //  println!(
+                    //    "bus: got an unknown external read (8-bit) to 0x{:08x}",
+                    //  physical_addr.0
+                    //);
 
                     0
                 }
@@ -714,7 +649,7 @@ impl CpuBus {
                 0x1fd80000..=0x1fd8002c => self.tmu.read_8(physical_addr), // timer
                 0x1fc0000c => 0,                                           // idk
                 _ => {
-                    panic!(
+                    println!(
                         "bus: got an unknown internal read (8-bit) to 0x{:08x}",
                         physical_addr.0
                     );

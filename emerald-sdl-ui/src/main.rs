@@ -4,213 +4,54 @@
 #![feature(const_mut_refs)]
 #![feature(const_fn_floating_point_arithmetic)]
 #![feature(stmt_expr_attributes)]
+#![feature(hash_extract_if)]
 
-use emerald_core::{hw::sh4::cpu::Float32, json_tests::JsonTest, scheduler::Scheduler};
+use emerald_core::context::Context;
+use emerald_core::hw::extensions::BitManipulation;
+use emerald_core::hw::holly::g1::gdi::GdiParser;
+use emerald_core::hw::sh4::bus::CpuBus;
+use emerald_core::scheduler::Scheduler;
+use emerald_core::EmulatorFrontendResponse;
+use emerald_core::{ControllerButton, EmulatorFrontendRequest, FramebufferFormat};
+use gpu::HardwareRasterizer;
+use sdl2::sys::abs;
+use sdl2::video::Window;
+use std::fmt::Display;
+use std::fs::File;
+use std::io::BufReader;
+use wgpu::util::DeviceExt;
 
+use std::ops::Sub;
 use std::{
     ffi::c_void,
-    fs::File,
-    io::BufReader,
     ops::DerefMut,
     sync::{mpsc, Arc, Mutex},
 };
 
-use emerald_core::{
-    context::{CallStack, Context},
-    emulator::{Breakpoint, Emulator, EmulatorState},
-    hw::{
-        extensions::BitManipulation,
-        holly::g1::gdi::GdiParser,
-        sh4::{bus::CpuBus, SH4EventData},
-    },
-    scheduler::ScheduledEvent,
-};
+use emerald_core::emulator::Emulator;
 use sdl2::{event::Event, keyboard::Keycode, libc::memcpy, pixels::PixelFormatEnum};
 
-fn draw_from_vram(buffer: &mut [u8], vram: &mut [u8], start_offset: usize) {
-    //println!("starting off is {:08x}", vram[0]);
-
-    unsafe {
-        // pointer to the vram buffer
-        let vram_ptr = (vram.as_mut_ptr() as *const u8).add(start_offset as usize);
-        // pointer to the sdl texture
-        memcpy(
-            buffer.as_mut_ptr() as *mut c_void,
-            vram_ptr as *mut c_void,
-            buffer.len(),
-        );
-    }
-}
-
-#[derive(Copy, Clone, Debug, Eq, PartialEq)]
-pub enum FramebufferFormat {
-    Rgb555,
-    Rgb565,
-    Rgb888,  // (packed)
-    ARgb888, // ??
-}
+mod gpu;
 
 pub fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
     let video_subsystem = sdl_context.video()?;
-    let format = FramebufferFormat::Rgb555;
 
-    let mut emulator = Arc::new(Mutex::new(Emulator::new()));
-    let window = video_subsystem
-        .window("", 640, 480)
+    let mut window = video_subsystem
+        .window("emerald", 1280, 960)
         .position_centered()
-        .opengl()
+        .metal_view()
         .build()
         .map_err(|e| e.to_string())?;
 
-    let mut canvas = window.into_canvas().build().map_err(|e| e.to_string())?;
+    let mut hw_rasterizer = HardwareRasterizer::new(&window);
     let mut event_pump = sdl_context.event_pump()?;
-    let tc = canvas.texture_creator();
-    let mut atlas_texture = tc
-        .create_texture_streaming(PixelFormatEnum::RGBA8888, 1024 as u32, 1024 as u32)
-        .map_err(|e| e.to_string())?;
-    let mut texture = tc
-        .create_texture_streaming(PixelFormatEnum::RGB555, 640 as u32, 480 as u32)
-        .map_err(|e| e.to_string())?;
-    let mut current_depth = FramebufferFormat::Rgb555;
-    let mut current_height = 640;
-    let mut current_width = 480;
-
-    #[cfg(feature = "json_tests")]
-    {
-        let mut emulator = Arc::new(Mutex::new(Emulator::new()));
-        for entry in glob::glob("/Users/ncarrillo/Desktop/projects/sh4/*.json").unwrap() {
-            match entry {
-                Ok(path) => {
-                    // Open the file in read-only mode with buffer.
-                    let file = File::open(&path).expect("file not found");
-                    let reader = BufReader::new(file);
-                    println!("running {}..", path.to_str().unwrap());
-
-                    let state: Vec<JsonTest> = serde_json::from_reader(reader).unwrap();
-
-                    let bus_arc = Arc::new(Mutex::new(CpuBus::new()));
-                    let gdi_image = GdiParser::load_from_file(
-                        "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/crazytaxi/ct.gdi",
-                    );
-
-                    let mut scheduler = Scheduler::new();
-
-                    {
-                        // initialize peripherals so they can schedule their initial events
-                        bus_arc.lock().unwrap().holly.init(&mut scheduler);
-                        bus_arc
-                            .lock()
-                            .unwrap()
-                            .holly
-                            .g1_bus
-                            .gd_rom
-                            .set_gdi(gdi_image);
-                    }
-
-                    let mut context = Context {
-                        scheduler: &mut scheduler,
-                        cyc: 0,
-                        tracing: false,
-                        inside_int: false,
-                        entered_main: false,
-                        is_test_mode: false,
-                        tripped_breakpoint: None,
-                        callstack: CallStack::new(),
-                        current_test: None,
-                        breakpoints: vec![],
-                    };
-
-                    for test in state {
-                        let mut emulator_guard = emulator.lock().unwrap();
-                        let mut emulator = emulator_guard.deref_mut();
-
-                        context.is_test_mode = true;
-                        println!("\nrunning sub-test for opcode {:04x}", test.opcodes[1]);
-
-                        emulator.cpu.registers.sr = test.initial.SR & 0x700083F3;
-                        emulator.cpu.set_pr(test.initial.PR);
-                        emulator.cpu.set_ssr(test.initial.SSR & 0x700083F3);
-                        emulator.cpu.set_spc(test.initial.SPC);
-                        emulator.cpu.set_gbr(test.initial.GBR);
-                        emulator.cpu.set_vbr(test.initial.VBR);
-                        emulator.cpu.set_dbr(test.initial.DBR);
-                        emulator.cpu.set_fpscr(test.initial.FPSCR);
-                        emulator.cpu.set_sgr(test.initial.SGR);
-                        emulator.cpu.set_macl(test.initial.MACL);
-                        emulator.cpu.set_mach(test.initial.MACH);
-                        emulator.cpu.registers.current_pc = test.initial.PC;
-                        emulator.cpu.set_fpul(Float32 {
-                            u: test.initial.FPUL,
-                        });
-
-                        for i in 0..16 {
-                            emulator.cpu.registers.r[i] = test.initial.R[i];
-                        }
-
-                        for i in 0..8 {
-                            emulator.cpu.registers.r_bank[i] = test.initial.R_[i];
-                        }
-
-                        context.cyc = 0;
-                        context.current_test = Some(test.clone());
-
-                        let mut bus_lock = bus_arc.lock().unwrap();
-                        while context.cyc <= 3 {
-                            emulator.cpu.exec_in_test(&mut bus_lock, &mut context);
-                        }
-
-                        assert_eq!(
-                            emulator.cpu.registers.current_pc, test.final_.PC,
-                            "pc did not match emu had {:08x} but test had {:08x}",
-                            emulator.cpu.registers.current_pc, test.final_.PC
-                        );
-
-                        for i in 0..16 {
-                            let reg = emulator.cpu.registers.r[i];
-
-                            if reg != test.final_.R[i] {
-                                panic!(
-                                    "r{} did not match emu had {:08x} but test had {:08x} vs our banked {:08x}",
-                                    i, reg, test.final_.R[i], emulator.cpu.registers.r_bank[i & 0x7]
-                                );
-                            }
-                        }
-
-                        for i in 0..8 {
-                            let reg_banked = emulator.cpu.registers.r_bank[i];
-                            assert_eq!(
-                                reg_banked, test.final_.R_[i],
-                                "r_bank{} did not match {} {} vs {}",
-                                i, reg_banked, test.final_.R_[i], emulator.cpu.registers.r[i]
-                            );
-                        }
-
-                        if true {
-                            if (emulator.cpu.registers.sr & 0x700083F3)
-                                != (test.final_.SR & 0x700083F3)
-                            {
-                                panic!(
-                                    "sr did not match emu had {:08x} but test had {:08x}",
-                                    emulator.cpu.registers.sr, test.final_.SR
-                                );
-                            }
-                        }
-
-                        //println!("passed!")
-                    }
-
-                    println!("passed all tests for file {}!\n", path.to_str().unwrap());
-                }
-                Err(e) => println!("{:?}", e),
-            }
-        }
-
-        return Ok(());
-    }
+    let emulator = Emulator::new();
 
     let (frame_ready_sender, frame_ready_receiver) = mpsc::channel();
-    Emulator::run_loop(emulator.clone(), frame_ready_sender);
+    let (frontend_request_sender, frontend_request_receiver) = mpsc::channel();
+
+    Emulator::run_loop(emulator, frame_ready_sender, frontend_request_receiver);
 
     'running: loop {
         for event in event_pump.poll_iter() {
@@ -220,74 +61,156 @@ pub fn main() -> Result<(), String> {
                     keycode: Some(Keycode::Escape),
                     ..
                 } => break 'running,
+                Event::KeyDown {
+                    keycode: Some(Keycode::R),
+                    ..
+                } => {}
+                Event::KeyDown {
+                    keycode: Some(Keycode::X),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonPressed(ControllerButton::X))
+                        .unwrap();
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::X),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonReleased(ControllerButton::X))
+                        .unwrap();
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::A),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonPressed(ControllerButton::A))
+                        .unwrap();
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::A),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonReleased(ControllerButton::A))
+                        .unwrap();
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::C),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonPressed(
+                            ControllerButton::Start,
+                        ))
+                        .unwrap();
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::C),
+                    ..
+                } => {
+                    // we need a way to pipe to maple that something here is wrong.
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonReleased(
+                            ControllerButton::Start,
+                        ))
+                        .unwrap();
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::Num1),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ToggleWireframe)
+                        .unwrap();
+                    hw_rasterizer.toggle_wireframe();
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::D),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonPressed(
+                            ControllerButton::Right,
+                        ))
+                        .unwrap();
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::D),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonReleased(
+                            ControllerButton::Right,
+                        ))
+                        .unwrap();
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::W),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonPressed(ControllerButton::Up))
+                        .unwrap();
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::W),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonReleased(
+                            ControllerButton::Up,
+                        ))
+                        .unwrap();
+                }
+                Event::KeyDown {
+                    keycode: Some(Keycode::S),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonPressed(
+                            ControllerButton::Down,
+                        ))
+                        .unwrap();
+                }
+                Event::KeyUp {
+                    keycode: Some(Keycode::S),
+                    ..
+                } => {
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::ButtonReleased(
+                            ControllerButton::Down,
+                        ))
+                        .unwrap();
+                }
                 _ => {}
             }
         }
 
-        if let Ok(mut frame) = frame_ready_receiver.try_recv() {
-            canvas.clear();
-
-            let width = 640;
-            let height = 480;
-            let depth = FramebufferFormat::Rgb565;
-
-            if current_depth != depth || (width != current_width) || (height != current_height) {
-                println!(
-                    "emerald: WARNING framebuffer changed. {}x{} format: {:#?}",
-                    width, height, depth
-                );
-                texture = tc
-                    .create_texture_streaming(
-                        match depth {
-                            FramebufferFormat::Rgb555 => PixelFormatEnum::RGB555,
-                            FramebufferFormat::Rgb565 => PixelFormatEnum::RGB565,
-                            FramebufferFormat::Rgb888 => PixelFormatEnum::RGB888,
-                            FramebufferFormat::ARgb888 => PixelFormatEnum::ABGR8888,
-                        },
-                        width as u32,
-                        height as u32,
-                    )
-                    .map_err(|e| e.to_string())?;
-
-                current_width = width;
-                current_height = height;
-                current_depth = depth;
+        if let Ok(resp) = frame_ready_receiver.try_recv() {
+            match resp {
+                EmulatorFrontendResponse::BlitFramebuffer(vram, width, height) => {
+                    println!("fb rendering {}x{} vs 480", width, height);
+                    hw_rasterizer.blit_fb(vram, width, 480);
+                }
+                EmulatorFrontendResponse::RenderHwRast(
+                    dl_id,
+                    texture_atlas,
+                    vram,
+                    pram,
+                    lists,
+                    bg_verts,
+                ) => {
+                    hw_rasterizer.render(dl_id, texture_atlas, vram, pram, bg_verts, lists);
+                    frontend_request_sender
+                        .send(EmulatorFrontendRequest::RenderingDone)
+                        .unwrap();
+                }
             }
-
-            texture.with_lock(None, |buffer: &mut [u8], _: usize| {
-                let mut bus_lock = frame.bus.lock().unwrap();
-                let bus = bus_lock.deref_mut();
-
-                draw_from_vram(
-                    buffer,
-                    &mut bus.holly.pvr.vram[bus.holly.registers.fb_display_addr1 as usize..],
-                    0 as usize,
-                );
-            })?;
-
-            /*  atlas_texture.with_lock(None, |buffer: &mut [u8], _: usize| {
-            unsafe {
-                memcpy(
-                    buffer.as_mut_ptr() as *mut c_void,
-                    bus.holly.pvr.texture_atlas.data.as_ptr() as *const c_void,
-                    1024 * 1024 * 4,
-                )
-            };
-            })?;*/
-
-            if false {
-                //  let dest_rect = sdl2::rect::Rect::new(0, 0, 1024 * 1, 1024 * 1); // Scale by 14
-                //    canvas.copy(&atlas_texture, None, Some(dest_rect));
-            } else {
-                //    let dest_rect = sdl2::rect::Rect::new(0, 0, 1024 * 1, 1024 * 1); // Scale by 14
-                canvas.copy(&texture, None, None);
-            }
-
-            canvas.present();
         }
     }
-
-    return Ok(());
 
     Ok(())
 }

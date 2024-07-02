@@ -1,7 +1,7 @@
 // cache and TLB controller
 
-use crate::hw::extensions::BitManipulation;
 use super::bus::PhysicalAddress;
+use crate::hw::extensions::BitManipulation;
 
 #[derive(Copy, Default, Clone, Debug, Eq, PartialEq)]
 pub struct CcnRegisters {
@@ -128,10 +128,8 @@ impl Ccn {
             0x1f00001c => self.registers.ccr.clear_bit(11).clear_bit(3),
             0x1f000028 => self.registers.intevt,
             0x1f000030 => 0x040205c1,
-            _ => panic!(
-                "ccn: unknown mmio read (32-bit) @ 0x{:08x}",
-                addr.0
-            )
+            0x1f000010 => self.registers.mmucr,
+            _ => panic!("ccn: unknown mmio read (32-bit) @ 0x{:08x}", addr.0),
         }
     }
 }
