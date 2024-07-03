@@ -31,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use crate::hw::holly::HollyEventData;
 use crate::scheduler::Scheduler;
 use crate::{
-    context::{Context},
+    context::Context,
     emulator::{Emulator, EmulatorState},
     hw::{
         extensions::BitManipulation,
@@ -43,6 +43,7 @@ use crate::{
 
 pub mod context;
 pub mod emulator;
+pub mod ffi;
 pub mod fifo;
 pub mod hw;
 pub mod scheduler;
@@ -107,7 +108,7 @@ impl Emulator {
             //  CdiParser::load_from_file("/Users/ncarrillo/Downloads/arm7wrestler.cdi");
 
             let gdi_image = GdiParser::load_from_file(
-                "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/gf/gf.gdi",
+                "/Users/ncarrillo/Desktop/projects/emerald/emerald-core/roms/powerstone/ps.gdi",
             );
 
             let mut scheduler = Scheduler::new();

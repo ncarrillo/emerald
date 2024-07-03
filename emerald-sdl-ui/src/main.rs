@@ -9,17 +9,16 @@
 use emerald_core::context::Context;
 use emerald_core::hw::extensions::BitManipulation;
 use emerald_core::hw::holly::g1::gdi::GdiParser;
+use emerald_core::hw::holly::pvr::wgpu::HardwareRasterizer;
 use emerald_core::hw::sh4::bus::CpuBus;
 use emerald_core::scheduler::Scheduler;
 use emerald_core::EmulatorFrontendResponse;
 use emerald_core::{ControllerButton, EmulatorFrontendRequest, FramebufferFormat};
-use gpu::HardwareRasterizer;
 use sdl2::sys::abs;
 use sdl2::video::Window;
 use std::fmt::Display;
 use std::fs::File;
 use std::io::BufReader;
-use wgpu::util::DeviceExt;
 
 use std::ops::Sub;
 use std::{
@@ -30,8 +29,6 @@ use std::{
 
 use emerald_core::emulator::Emulator;
 use sdl2::{event::Event, keyboard::Keycode, libc::memcpy, pixels::PixelFormatEnum};
-
-mod gpu;
 
 pub fn main() -> Result<(), String> {
     let sdl_context = sdl2::init()?;
@@ -44,7 +41,7 @@ pub fn main() -> Result<(), String> {
         .build()
         .map_err(|e| e.to_string())?;
 
-    let mut hw_rasterizer = HardwareRasterizer::new(&window);
+    let mut hw_rasterizer = HardwareRasterizer::new(&window, window.size());
     let mut event_pump = sdl_context.event_pump()?;
     let emulator = Emulator::new();
 

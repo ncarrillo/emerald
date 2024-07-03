@@ -505,51 +505,6 @@ impl Cpu {
         }
     }
 
-    pub fn exec_in_test(&mut self, bus: &mut CpuBus, context: &mut Context) -> Result<(), ()> {
-        self.current_opcode = bus.read_16(self.registers.current_pc, true, context);
-
-        let decoded = self.opcode_lut[self.current_opcode as usize];
-        if true {
-            println!(
-                "\t{:08x} ({:04x}): {}",
-                self.registers.current_pc, self.current_opcode, decoded.disassembly
-            );
-        }
-
-        if decoded.disassembly == "unk" {
-            return Err(());
-        }
-
-        (decoded.handler)(self, &decoded, bus, context);
-        context.cyc = context.cyc + 1;
-        Ok(())
-    }
-
-    pub fn exec_delay_slot_in_test(
-        &mut self,
-        bus: &mut CpuBus,
-        context: &mut Context,
-    ) -> Result<(), ()> {
-        context.cyc = context.cyc + 1;
-        self.current_opcode = bus.read_16(self.registers.current_pc, true, context);
-
-        let decoded = self.opcode_lut[self.current_opcode as usize];
-        if true {
-            println!(
-                "\t{:08x}: {} (delay slot)",
-                self.registers.current_pc, decoded.disassembly
-            );
-        }
-
-        if decoded.disassembly == "unk" {
-            return Err(());
-        }
-
-        (decoded.handler)(self, &decoded, bus, context);
-
-        Ok(())
-    }
-
     pub fn exec_next_opcode(&mut self, bus: &mut CpuBus, context: &mut Context, cyc: u64) {
         if self.state == CpuState::Running {
             self.cyc = cyc;

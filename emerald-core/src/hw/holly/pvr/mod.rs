@@ -1,8 +1,8 @@
 pub mod display_list;
 pub mod framebuffer;
-pub mod raster;
 pub mod ta;
 pub mod texture_cache;
+pub mod wgpu;
 
 use std::sync::{Arc, RwLock};
 

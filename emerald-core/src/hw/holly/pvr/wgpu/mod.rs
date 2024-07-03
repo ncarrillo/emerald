@@ -4,14 +4,17 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use emerald_core::hw::holly::pvr::{
+use crate::hw::holly::pvr::{
     display_list::{DisplayListBuilder, DisplayListItem, VertexDefinition},
     ta::PvrListType,
     texture_cache::{TextureAtlas, TextureId},
     Pvr,
 };
 pub use texture::*;
-use wgpu::{BindGroup, BindGroupLayout, Color, Device, COPY_BUFFER_ALIGNMENT};
+use wgpu::{
+    rwh::{HasDisplayHandle, HasWindowHandle},
+    BindGroup, BindGroupLayout, Color, Device, COPY_BUFFER_ALIGNMENT,
+};
 
 pub const OPAQUE_PASS: usize = 0;
 pub const OPAQUE_WF_PASS: usize = 1;
@@ -135,8 +138,8 @@ pub struct HardwareRasterizer<'a> {
 }
 
 impl<'a> HardwareRasterizer<'a> {
-    pub fn new(window: &sdl2::video::Window) -> Self {
-        pollster::block_on(HardwareRasterizer::init(&window))
+    pub fn new<W: HasDisplayHandle + HasWindowHandle>(window: &W, size: (u32, u32)) -> Self {
+        pollster::block_on(HardwareRasterizer::init(&window, size))
     }
 
     pub fn toggle_wireframe(&mut self) {
@@ -1019,7 +1022,10 @@ impl<'a> HardwareRasterizer<'a> {
         }
     }
 
-    async fn init(window: &sdl2::video::Window) -> Self {
+    async fn init<W: HasDisplayHandle + HasWindowHandle>(
+        display_handle: W,
+        size: (u32, u32),
+    ) -> Self {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             backends: wgpu::Backends::METAL,
             ..Default::default()
@@ -1028,7 +1034,7 @@ impl<'a> HardwareRasterizer<'a> {
         let surface = unsafe {
             instance
                 .create_surface_unsafe(
-                    wgpu::SurfaceTargetUnsafe::from_window(&window)
+                    wgpu::SurfaceTargetUnsafe::from_window(&display_handle)
                         .expect("failed to create surface"),
                 )
                 .expect("failed to create surface")
@@ -1069,7 +1075,6 @@ impl<'a> HardwareRasterizer<'a> {
             .await
             .unwrap();
 
-        let size = window.size();
         let surface_caps = surface.get_capabilities(&adapter);
         let surface_format = surface_caps
             .formats
